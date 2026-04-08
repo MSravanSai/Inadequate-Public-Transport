@@ -6,6 +6,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { format } from 'date-fns';
 import { useToast } from '@/components/ui/use-toast';
+import { busRequestsService } from '@/services/firebase';
 
 const STATUS_CONFIG = {
   pending: { label: 'Pending', class: 'bg-yellow-100 text-yellow-700 border-yellow-200' },
@@ -22,26 +23,28 @@ export default function BusRequests() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  // Load from localStorage on mount - only auto-generated requests from LiveMonitor
+  // Load from Firebase on mount
   useEffect(() => {
-    const saved = localStorage.getItem('busRequests');
-    if (saved) {
+    const loadRequests = async () => {
       try {
-        setRequests(JSON.parse(saved));
-      } catch (e) {
-        console.error('Failed to load bus requests from localStorage:', e);
+        const data = await busRequestsService.getAllRequests();
+        setRequests(data);
+      } catch (error) {
+        console.error('Failed to load bus requests:', error);
       }
-    }
+    };
+    loadRequests();
+
+    // Subscribe to real-time updates
+    const unsubscribe = busRequestsService.subscribeToRequests((updatedRequests) => {
+      setRequests(updatedRequests);
+    });
+
+    return () => unsubscribe();
   }, []);
 
-  // Save to localStorage whenever requests change
-  useEffect(() => {
-    localStorage.setItem('busRequests', JSON.stringify(requests));
-  }, [requests]);
-
-
   const updateRequest = useMutation({
-    mutationFn: ({ id, data }) => Promise.resolve({ id, data }),
+    mutationFn: ({ id, data }) => busRequestsService.updateRequest(id, data),
     onSuccess: ({ id, data }) => {
       setRequests(prev => prev.map(req => req.id === id ? { ...req, ...data } : req));
       setSelected(null);

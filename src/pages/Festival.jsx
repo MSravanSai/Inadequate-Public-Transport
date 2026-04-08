@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { useMutation } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, Calendar, Trash2, Star } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -7,6 +7,7 @@ import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { format } from 'date-fns';
 import { useToast } from '@/components/ui/use-toast';
+import { festivalsService } from '@/services/firebase';
 
 const SAMPLE_FESTIVALS = [
   { name: 'Dussehra', date: '2026-10-02', description: 'Major Hindu festival' },
@@ -21,38 +22,18 @@ const empty = { name: '', date: '', description: '', is_active: true };
 export default function Festivals() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(empty);
-  const [festivals, setFestivals] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
   const { toast } = useToast();
+  const queryClient = useQueryClient();
 
-  const saveFestivals = (newFestivals) => {
-    setFestivals(newFestivals);
-    localStorage.setItem('festivals', JSON.stringify(newFestivals));
-  };
-
-  useEffect(() => {
-    const saved = localStorage.getItem('festivals');
-    if (saved) {
-      try {
-        setFestivals(JSON.parse(saved));
-      } catch (e) {
-        console.error('Failed to load festivals from localStorage:', e);
-        setFestivals(SAMPLE_FESTIVALS.map(f => ({ ...f, id: f.name.toLowerCase().replace(' ', '-'), is_active: false })));
-      }
-    } else {
-      setFestivals(SAMPLE_FESTIVALS.map(f => ({ ...f, id: f.name.toLowerCase().replace(' ', '-'), is_active: false })));
-    }
-    setIsLoading(false);
-  }, []);
+  const { data: festivals = [], isLoading } = useQuery({
+    queryKey: ['festival-days'],
+    queryFn: () => festivalsService.getAllFestivals(),
+  });
 
   const create = useMutation({
-    mutationFn: (data) => Promise.resolve({ ...data, id: Date.now().toString() }),
-    onSuccess: (newFestival) => {
-      const updated = [
-        ...festivals,
-        { ...newFestival, is_active: newFestival.is_active ?? true },
-      ];
-      saveFestivals(updated);
+    mutationFn: (data) => festivalsService.addFestival(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['festival-days'] });
       setOpen(false);
       setForm(empty);
       toast({ title: 'Festival day added' });
@@ -60,19 +41,17 @@ export default function Festivals() {
   });
 
   const toggle = useMutation({
-    mutationFn: ({ id, is_active }) => Promise.resolve({ id, is_active }),
-    onSuccess: ({ id, is_active }) => {
-      const updated = festivals.map(f => f.id === id ? { ...f, is_active } : f);
-      saveFestivals(updated);
-      toast({ title: `Festival ${is_active ? 'activated' : 'deactivated'}` });
+    mutationFn: ({ id, is_active }) => festivalsService.updateFestival(id, { is_active }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['festival-days'] });
+      toast({ title: 'Festival updated' });
     },
   });
 
   const remove = useMutation({
-    mutationFn: (id) => Promise.resolve(id),
-    onSuccess: (id) => {
-      const updated = festivals.filter(f => f.id !== id);
-      saveFestivals(updated);
+    mutationFn: (id) => festivalsService.deleteFestival(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['festival-days'] });
       toast({ title: 'Deleted' });
     },
   });
@@ -83,7 +62,9 @@ export default function Festivals() {
       id: f.name.toLowerCase().replace(' ', '-'),
       is_active: false,
     }));
-    saveFestivals(seeded);
+    // Add all sample festivals to Firebase
+    await Promise.all(seeded.map(festival => festivalsService.addFestival(festival)));
+    queryClient.invalidateQueries({ queryKey: ['festival-days'] });
     toast({ title: 'Sample festivals added' });
   };
 

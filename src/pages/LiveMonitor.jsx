@@ -8,6 +8,7 @@ import { Textarea } from '@/components/ui/textarea';
 import CrowdBadge from '@/components/CrowdBadge';
 import { format } from 'date-fns';
 import { useToast } from '@/components/ui/use-toast';
+import { crowdReadingsService, busRequestsService, storageService } from '@/services/firebase';
 
 const DEFAULT_ROUTES = [
   { id: 'r1', name: 'Madurai → Bangalore', color: 'bg-blue-500' },
@@ -568,32 +569,26 @@ export default function LiveMonitor() {
 
   const { data: readings = [], refetch } = useQuery({
     queryKey: ['crowd-readings'],
-    queryFn: () => {
-      const saved = localStorage.getItem('crowdReadings');
-      if (saved) {
-        try {
-          return Promise.resolve(JSON.parse(saved));
-        } catch (e) {
-          console.error('Failed to load readings from localStorage:', e);
-        }
+    queryFn: async () => {
+      try {
+        return await crowdReadingsService.getReadingsByRoute(selectedRoute);
+      } catch (error) {
+        console.error('Error fetching readings:', error);
+        return [];
       }
-      return Promise.resolve([]);
     },
     refetchInterval: 15000,
   });
 
   const { data: requests = [] } = useQuery({
     queryKey: ['extra-bus-requests'],
-    queryFn: () => {
-      const saved = localStorage.getItem('busRequests');
-      if (saved) {
-        try {
-          return Promise.resolve(JSON.parse(saved));
-        } catch (e) {
-          console.error('Failed to load requests from localStorage:', e);
-        }
+    queryFn: async () => {
+      try {
+        return await busRequestsService.getAllRequests();
+      } catch (error) {
+        console.error('Error fetching requests:', error);
+        return [];
       }
-      return Promise.resolve([]);
     },
   });
 
@@ -618,12 +613,16 @@ export default function LiveMonitor() {
 
 
   const createReading = useMutation({
-    mutationFn: (data) => Promise.resolve({ ...data, id: Date.now() }),
+    mutationFn: async (data) => {
+      return await crowdReadingsService.addReading(data);
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['crowd-readings'] }),
   });
 
   const createRequest = useMutation({
-    mutationFn: (data) => Promise.resolve({ ...data, id: Date.now() }),
+    mutationFn: async (data) => {
+      return await busRequestsService.addRequest(data);
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['extra-bus-requests'] }),
   });
 
@@ -672,7 +671,25 @@ export default function LiveMonitor() {
 
   const handleReading = async (routeId, routeName, location, count, festival, snapshotUrl) => {
     const level = getCrowdLevel(count, festival, location);
-    
+
+    // Upload image to Firebase Storage if it's a local file
+    let finalSnapshotUrl = snapshotUrl;
+    if (snapshotUrl && snapshotUrl.startsWith('blob:')) {
+      try {
+        const response = await fetch(snapshotUrl);
+        const blob = await response.blob();
+        const fileName = `crowd-readings/${routeId}/${location}/${Date.now()}.jpg`;
+        finalSnapshotUrl = await storageService.uploadImage(blob, fileName);
+      } catch (error) {
+        console.error('Error uploading image:', error);
+        toast({
+          title: 'Upload Error',
+          description: 'Failed to upload image to cloud storage.',
+          variant: 'destructive',
+        });
+      }
+    }
+
     // Map location for storage
     const locationMap = {
       'front_inside_bus': 'inside_bus',
@@ -688,13 +705,13 @@ export default function LiveMonitor() {
       people_count: count,
       crowd_level: level,
       is_festival_day: festival,
-      snapshot_url: snapshotUrl,
+      snapshot_url: finalSnapshotUrl,
       created_date: new Date().toISOString(),
     });
 
     // Auto-trigger extra bus request based on location-specific thresholds
     const locationThreshold = LOCATION_THRESHOLDS[location]?.[festival ? 'festival' : 'normal'] || 40;
-    
+
     if (count >= locationThreshold) {
       const alreadyPending = requests.some(r => r.route_id === routeId && r.status === 'pending');
       if (!alreadyPending) {
@@ -707,7 +724,6 @@ export default function LiveMonitor() {
           buses_requested: extra,
           reason: `Camera detected ${count} people at ${LOCATION_LABELS[location] || location} — exceeds location threshold of ${locationThreshold}`,
           is_festival_day: festival,
-          status: 'pending',
           requested_at: new Date().toISOString(),
         });
         toast({

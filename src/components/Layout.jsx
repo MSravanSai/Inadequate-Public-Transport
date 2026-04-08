@@ -1,5 +1,5 @@
 import { Outlet, Link, useLocation } from 'react-router-dom';
-import { Bus, Camera, LayoutDashboard, AlertCircle, Settings, Calendar, Users, Menu, X, LogOut, User } from 'lucide-react';
+import { Bus, Camera, LayoutDashboard, AlertCircle, Calendar, Users, Menu, X, LogOut } from 'lucide-react';
 import { useState } from 'react';
 import { useAuth } from '@/lib/AuthContext';
 import { Button } from '@/components/ui/button';

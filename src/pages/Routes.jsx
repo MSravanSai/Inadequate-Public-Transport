@@ -1,11 +1,12 @@
-import { useState, useEffect } from 'react';
-import { useMutation } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, Bus, Edit2, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useToast } from '@/components/ui/use-toast';
+import { routesService } from '@/services/firebase';
 
 const DEFAULT_ROUTES = [
   { id: 1, name: 'Madurai → Bangalore', destination: 'Bangalore', distance_km: 452, normal_threshold: '', festival_threshold: '', scheduled_buses: 8 },
@@ -20,33 +21,20 @@ export default function Routes() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(empty);
   const [editing, setEditing] = useState(null);
-  const [routes, setRoutes] = useState(DEFAULT_ROUTES);
   const [errors, setErrors] = useState({});
   const { toast } = useToast();
-  const isLoading = false;
+  const queryClient = useQueryClient();
 
-  // Load from localStorage on mount
-  useEffect(() => {
-    const saved = localStorage.getItem('routes');
-    if (saved) {
-      try {
-        setRoutes(JSON.parse(saved));
-      } catch (e) {
-        console.error('Failed to load routes from localStorage:', e);
-      }
-    }
-  }, []);
-
-  // Save to localStorage whenever routes change
-  useEffect(() => {
-    localStorage.setItem('routes', JSON.stringify(routes));
-  }, [routes]);
+  const { data: routes = [], isLoading } = useQuery({
+    queryKey: ['routes'],
+    queryFn: () => routesService.getAllRoutes(),
+  });
 
 
   const create = useMutation({
-    mutationFn: (data) => Promise.resolve({ ...data, id: Date.now() }),
-    onSuccess: (newRoute) => {
-      setRoutes(prev => [...prev, newRoute]);
+    mutationFn: (data) => routesService.addRoute(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['routes'] });
       setOpen(false);
       setForm(empty);
       toast({ title: 'Route added' });
@@ -54,9 +42,9 @@ export default function Routes() {
   });
 
   const update = useMutation({
-    mutationFn: ({ id, data }) => Promise.resolve({ id, ...data }),
-    onSuccess: ({ id, ...data }) => {
-      setRoutes(prev => prev.map(route => route.id === id ? { ...route, ...data } : route));
+    mutationFn: ({ id, data }) => routesService.updateRoute(id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['routes'] });
       setOpen(false);
       setEditing(null);
       toast({ title: 'Route updated' });
@@ -64,9 +52,9 @@ export default function Routes() {
   });
 
   const remove = useMutation({
-    mutationFn: (id) => Promise.resolve(id),
-    onSuccess: (id) => {
-      setRoutes(prev => prev.filter(route => route.id !== id));
+    mutationFn: (id) => routesService.deleteRoute(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['routes'] });
       toast({ title: 'Route deleted' });
     },
   });

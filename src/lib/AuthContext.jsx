@@ -1,42 +1,18 @@
 import React, { createContext, useState, useContext, useEffect } from 'react';
+import { app as firebaseApp } from '@/services/firebase';
 
-// Firebase will be available if installed
-const firebaseAvailable = () => {
-  try {
-    return typeof window !== 'undefined' && window.firebase !== undefined;
-  } catch {
-    return false;
-  }
-};
-
-// Firebase configuration (you'll need to replace with your actual config)
-const firebaseConfig = {
-  apiKey: "your-api-key",
-  authDomain: "your-project.firebaseapp.com",
-  projectId: "your-project-id",
-  storageBucket: "your-project.appspot.com",
-  messagingSenderId: "123456789",
-  appId: "your-app-id"
-};
-
-// Firebase objects - will be initialized if Firebase is available and configured
 let app = null;
 let auth = null;
 let googleProvider = null;
 
-// Initialize Firebase dynamically
 const initializeFirebase = async () => {
-  if (!firebaseAvailable() || app) return;
+  if (auth) return;
 
   try {
-    const { initializeApp: initApp } = await import('firebase/app');
     const { getAuth: getAuthFn, GoogleAuthProvider: GoogleProvider } = await import('firebase/auth');
-
-    if (firebaseConfig.apiKey && firebaseConfig.apiKey !== "your-api-key") {
-      app = initApp(firebaseConfig);
-      auth = getAuthFn(app);
-      googleProvider = new GoogleProvider();
-    }
+    app = firebaseApp;
+    auth = getAuthFn(app);
+    googleProvider = new GoogleProvider();
   } catch (error) {
     console.warn('Firebase initialization failed:', error);
   }
@@ -145,7 +121,7 @@ export const AuthProvider = ({ children }) => {
     await initializeFirebase();
 
     if (!auth) {
-      throw new Error('Google authentication not configured. Please install Firebase and configure it properly.');
+      throw new Error('Google authentication is not ready. Check that Firebase Auth is enabled and the Firebase config matches this project.');
     }
 
     try {

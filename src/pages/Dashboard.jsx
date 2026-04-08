@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import StatCard from '@/components/StatCard';
 import CrowdBadge from '@/components/CrowdBadge';
 import { format } from 'date-fns';
+import { crowdReadingsService, busRequestsService, festivalsService } from '@/services/firebase';
 
 const ROUTES = [
   { id: 'r1', name: 'Madurai → Bangalore', color: 'bg-blue-500' },
@@ -29,48 +30,18 @@ function getCrowdLevel(count, isFestival, location = 'bus_stand') {
 export default function Dashboard() {
   const { data: readings = [] } = useQuery({
     queryKey: ['crowd-readings'],
-    queryFn: () => {
-      const saved = localStorage.getItem('crowdReadings');
-      if (saved) {
-        try {
-          return Promise.resolve(JSON.parse(saved));
-        } catch (e) {
-          console.error('Failed to load readings from localStorage:', e);
-        }
-      }
-      return Promise.resolve([]);
-    },
+    queryFn: () => crowdReadingsService.getAllReadings(),
     refetchInterval: 30000,
   });
 
   const { data: requests = [] } = useQuery({
     queryKey: ['extra-bus-requests'],
-    queryFn: () => {
-      const saved = localStorage.getItem('busRequests');
-      if (saved) {
-        try {
-          return Promise.resolve(JSON.parse(saved));
-        } catch (e) {
-          console.error('Failed to load requests from localStorage:', e);
-        }
-      }
-      return Promise.resolve([]);
-    },
+    queryFn: () => busRequestsService.getAllRequests(),
   });
 
   const { data: festivals = [] } = useQuery({
     queryKey: ['festival-days'],
-    queryFn: () => {
-      const saved = localStorage.getItem('festivals');
-      if (saved) {
-        try {
-          return Promise.resolve(JSON.parse(saved));
-        } catch (e) {
-          console.error('Failed to load festivals from localStorage:', e);
-        }
-      }
-      return Promise.resolve([]);
-    },
+    queryFn: () => festivalsService.getAllFestivals(),
   });
 
 

@@ -13,7 +13,7 @@ import BusRequests from '@/pages/BusRequest';
 import RoutesPage from '@/pages/Routes';
 import Festivals from '@/pages/Festival';
 import PublicView from '@/pages/PublicView';
-
+// Import Firebase configuration
 const AuthenticatedApp = () => {
   const { isLoadingAuth, isLoadingPublicSettings, authError, isAuthenticated } = useAuth();
 

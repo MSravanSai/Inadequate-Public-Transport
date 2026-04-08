@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
-import { Bus, Clock, Users, MapPin, RefreshCw } from 'lucide-react';
+import { Bus, Clock, RefreshCw } from 'lucide-react';
 import CrowdBadge from '@/components/CrowdBadge';
 import { format } from 'date-fns';
+import { crowdReadingsService, busRequestsService, festivalsService } from '@/services/firebase';
 
 const ROUTES = [
   { id: 'r1', name: 'Madurai → Bangalore', eta: '8h 30m' },
@@ -13,49 +14,19 @@ const ROUTES = [
 export default function PublicView() {
   const { data: readings = [], refetch, isFetching } = useQuery({
     queryKey: ['crowd-readings-public'],
-    queryFn: () => {
-      const saved = localStorage.getItem('crowdReadings');
-      if (saved) {
-        try {
-          return Promise.resolve(JSON.parse(saved));
-        } catch (e) {
-          console.error('Failed to load readings:', e);
-        }
-      }
-      return Promise.resolve([]);
-    },
+    queryFn: () => crowdReadingsService.getAllReadings(),
     refetchInterval: 15000,
   });
 
   const { data: requests = [] } = useQuery({
     queryKey: ['extra-bus-requests-public'],
-    queryFn: () => {
-      const saved = localStorage.getItem('busRequests');
-      if (saved) {
-        try {
-          return Promise.resolve(JSON.parse(saved));
-        } catch (e) {
-          console.error('Failed to load requests:', e);
-        }
-      }
-      return Promise.resolve([]);
-    },
+    queryFn: () => busRequestsService.getAllRequests(),
     refetchInterval: 10000,
   });
 
   const { data: festivals = [] } = useQuery({
     queryKey: ['festival-days-public'],
-    queryFn: () => {
-      const saved = localStorage.getItem('festivals');
-      if (saved) {
-        try {
-          return Promise.resolve(JSON.parse(saved));
-        } catch (e) {
-          console.error('Failed to load festivals:', e);
-        }
-      }
-      return Promise.resolve([]);
-    },
+    queryFn: () => festivalsService.getAllFestivals(),
     refetchInterval: 10000,
   });
 
