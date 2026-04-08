@@ -1,0 +1,25 @@
+{
+  "name": "FestivalDay",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Festival name e.g. Dussehra, New Year"
+    },
+    "date": {
+      "type": "string",
+      "format": "date"
+    },
+    "description": {
+      "type": "string"
+    },
+    "is_active": {
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "required": [
+    "name",
+    "date"
+  ]
+}

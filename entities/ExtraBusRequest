@@ -1,0 +1,64 @@
+{
+  "name": "ExtraBusRequest",
+  "type": "object",
+  "properties": {
+    "route_id": {
+      "type": "string"
+    },
+    "route_name": {
+      "type": "string"
+    },
+    "crowd_reading_id": {
+      "type": "string"
+    },
+    "people_count": {
+      "type": "number"
+    },
+    "location": {
+      "type": "string",
+      "enum": [
+        "bus_stand",
+        "inside_bus"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "approved",
+        "rejected",
+        "deployed"
+      ],
+      "default": "pending"
+    },
+    "buses_requested": {
+      "type": "number"
+    },
+    "buses_approved": {
+      "type": "number"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "admin_notes": {
+      "type": "string"
+    },
+    "is_festival_day": {
+      "type": "boolean",
+      "default": false
+    },
+    "requested_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "resolved_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "route_id",
+    "people_count",
+    "buses_requested"
+  ]
+}

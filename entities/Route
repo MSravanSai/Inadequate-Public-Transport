@@ -1,0 +1,36 @@
+{
+  "name": "Route",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Route name e.g. Madurai - Bangalore"
+    },
+    "destination": {
+      "type": "string"
+    },
+    "distance_km": {
+      "type": "number"
+    },
+    "normal_threshold": {
+      "type": "number",
+      "description": "Crowd count threshold on normal days to trigger extra bus"
+    },
+    "festival_threshold": {
+      "type": "number",
+      "description": "Crowd count threshold on festival days to trigger extra bus"
+    },
+    "scheduled_buses": {
+      "type": "number",
+      "description": "Regular scheduled buses per day"
+    },
+    "is_active": {
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "required": [
+    "name",
+    "destination"
+  ]
+}

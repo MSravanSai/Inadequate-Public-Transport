@@ -1,0 +1,52 @@
+{
+  "name": "CrowdReading",
+  "type": "object",
+  "properties": {
+    "route_id": {
+      "type": "string"
+    },
+    "route_name": {
+      "type": "string"
+    },
+    "location": {
+      "type": "string",
+      "enum": [
+        "bus_stand",
+        "inside_bus"
+      ],
+      "description": "Where the reading was taken"
+    },
+    "camera_id": {
+      "type": "string"
+    },
+    "people_count": {
+      "type": "number"
+    },
+    "crowd_level": {
+      "type": "string",
+      "enum": [
+        "low",
+        "moderate",
+        "high",
+        "critical"
+      ]
+    },
+    "is_festival_day": {
+      "type": "boolean",
+      "default": false
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "snapshot_url": {
+      "type": "string",
+      "description": "Camera snapshot image URL"
+    }
+  },
+  "required": [
+    "route_id",
+    "people_count",
+    "location"
+  ]
+}
