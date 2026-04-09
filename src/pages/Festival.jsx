@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, Calendar, Trash2, Star } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -22,12 +22,18 @@ const empty = { name: '', date: '', description: '', is_active: true };
 export default function Festivals() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(empty);
+  const autoSeededRef = useRef(false);
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
   const { data: festivals = [], isLoading } = useQuery({
     queryKey: ['festival-days'],
-    queryFn: () => festivalsService.getAllFestivals(),
+    queryFn: () => festivalsService.getFestivals(),
+  });
+
+  const uniqueFestivals = festivals.filter((festival, index, list) => {
+    const key = `${festival.name}|${festival.date}`;
+    return index === list.findIndex(item => `${item.name}|${item.date}` === key);
   });
 
   const create = useMutation({
@@ -57,16 +63,30 @@ export default function Festivals() {
   });
 
   const handleSeed = async () => {
-    const seeded = SAMPLE_FESTIVALS.map(f => ({
+    const existingKeys = new Set(uniqueFestivals.map(f => `${f.name}|${f.date}`));
+    const missing = SAMPLE_FESTIVALS.filter(f => !existingKeys.has(`${f.name}|${f.date}`));
+
+    if (!missing.length) return;
+
+    const seeded = missing.map(f => ({
       ...f,
-      id: f.name.toLowerCase().replace(' ', '-'),
       is_active: false,
     }));
-    // Add all sample festivals to Firebase
+
     await Promise.all(seeded.map(festival => festivalsService.addFestival(festival)));
     queryClient.invalidateQueries({ queryKey: ['festival-days'] });
     toast({ title: 'Sample festivals added' });
   };
+
+  useEffect(() => {
+    if (!isLoading && !autoSeededRef.current) {
+      const existingKeys = new Set(uniqueFestivals.map(f => `${f.name}|${f.date}`));
+      const missing = SAMPLE_FESTIVALS.filter(f => !existingKeys.has(`${f.name}|${f.date}`));
+      if (!missing.length) return;
+      autoSeededRef.current = true;
+      handleSeed();
+    }
+  }, [handleSeed, isLoading, uniqueFestivals]);
 
   const today = format(new Date(), 'yyyy-MM-dd');
 
@@ -78,7 +98,7 @@ export default function Festivals() {
           <p className="text-muted-foreground text-sm mt-0.5">Lower crowd thresholds apply on these days</p>
         </div>
         <div className="flex gap-2">
-          {festivals.length === 0 && (
+          {uniqueFestivals.length === 0 && (
             <Button variant="outline" size="sm" onClick={handleSeed}>Seed Sample</Button>
           )}
           <Button size="sm" onClick={() => { setForm(empty); setOpen(true); }}>
@@ -99,7 +119,7 @@ export default function Festivals() {
 
       {isLoading ? (
         <div className="text-center py-10 text-muted-foreground">Loading...</div>
-      ) : festivals.length === 0 ? (
+      ) : uniqueFestivals.length === 0 ? (
         <div className="text-center py-16 bg-card rounded-2xl border border-border">
           <Calendar className="w-10 h-10 mx-auto mb-3 text-muted-foreground/30" />
           <p className="text-muted-foreground text-sm mb-4">No festival days configured.</p>
@@ -107,7 +127,7 @@ export default function Festivals() {
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-          {festivals.map(f => {
+          {uniqueFestivals.map(f => {
             const isToday = f.date === today;
             return (
               <div key={f.id} className={`bg-card rounded-2xl border p-4 shadow-sm ${isToday ? 'border-orange-300 ring-1 ring-orange-200' : 'border-border'} ${!f.is_active ? 'opacity-50' : ''}`}>

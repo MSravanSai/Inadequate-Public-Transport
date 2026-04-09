@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, Bus, Edit2, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -9,10 +9,10 @@ import { useToast } from '@/components/ui/use-toast';
 import { routesService } from '@/services/firebase';
 
 const DEFAULT_ROUTES = [
-  { id: 1, name: 'Madurai → Bangalore', destination: 'Bangalore', distance_km: 452, normal_threshold: '', festival_threshold: '', scheduled_buses: 8 },
-  { id: 2, name: 'Madurai → Hyderabad', destination: 'Hyderabad', distance_km: 812, normal_threshold: '', festival_threshold: '', scheduled_buses: 4 },
-  { id: 3, name: 'Madurai → Chennai', destination: 'Chennai', distance_km: 460, normal_threshold: '', festival_threshold: '', scheduled_buses: 12 },
-  { id: 4, name: 'Madurai → Coimbatore', destination: 'Coimbatore', distance_km: 213, normal_threshold: '', festival_threshold: '', scheduled_buses: 10 },
+  { name: 'Madurai -> Bangalore', destination: 'Bangalore', distance_km: 452, normal_threshold: 60, festival_threshold: 85, scheduled_buses: 8, is_active: true },
+  { name: 'Madurai -> Hyderabad', destination: 'Hyderabad', distance_km: 812, normal_threshold: 60, festival_threshold: 85, scheduled_buses: 4, is_active: true },
+  { name: 'Madurai -> Chennai', destination: 'Chennai', distance_km: 460, normal_threshold: 60, festival_threshold: 85, scheduled_buses: 12, is_active: true },
+  { name: 'Madurai -> Coimbatore', destination: 'Coimbatore', distance_km: 213, normal_threshold: 60, festival_threshold: 85, scheduled_buses: 10, is_active: true },
 ];
 
 const empty = { name: '', destination: '', distance_km: '', normal_threshold: '', festival_threshold: '', scheduled_buses: 6, is_active: true };
@@ -22,14 +22,14 @@ export default function Routes() {
   const [form, setForm] = useState(empty);
   const [editing, setEditing] = useState(null);
   const [errors, setErrors] = useState({});
+  const autoSeededRef = useRef(false);
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
   const { data: routes = [], isLoading } = useQuery({
     queryKey: ['routes'],
-    queryFn: () => routesService.getAllRoutes(),
+    queryFn: () => routesService.getRoutes(),
   });
-
 
   const create = useMutation({
     mutationFn: (data) => routesService.addRoute(data),
@@ -83,9 +83,25 @@ export default function Routes() {
   };
 
   const handleSeed = async () => {
-    setRoutes(DEFAULT_ROUTES);
+    const existingKeys = new Set(routes.map(r => `${r.name}|${r.destination}`));
+    const missing = DEFAULT_ROUTES.filter(r => !existingKeys.has(`${r.name}|${r.destination}`));
+
+    if (!missing.length) return;
+
+    await Promise.all(missing.map(route => routesService.addRoute(route)));
+    queryClient.invalidateQueries({ queryKey: ['routes'] });
     toast({ title: 'Sample routes added' });
   };
+
+  useEffect(() => {
+    if (!isLoading && !autoSeededRef.current) {
+      const existingKeys = new Set(routes.map(r => `${r.name}|${r.destination}`));
+      const missing = DEFAULT_ROUTES.filter(r => !existingKeys.has(`${r.name}|${r.destination}`));
+      if (!missing.length) return;
+      autoSeededRef.current = true;
+      handleSeed();
+    }
+  }, [handleSeed, isLoading, routes]);
 
   const handleSubmit = () => {
     const nextErrors = validate(form);
@@ -171,7 +187,7 @@ export default function Routes() {
           </DialogHeader>
           <div className="space-y-3">
             {[
-              { label: 'Route Name', key: 'name', placeholder: 'Madurai → Bangalore' },
+              { label: 'Route Name', key: 'name', placeholder: 'Madurai -> Bangalore' },
               { label: 'Destination', key: 'destination', placeholder: 'Bangalore' },
               { label: 'Distance (km)', key: 'distance_km', type: 'number' },
               { label: 'Normal Threshold (people)', key: 'normal_threshold', type: 'number' },

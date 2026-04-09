@@ -64,6 +64,18 @@ export const crowdReadingsService = {
     }
   },
 
+  // Get all readings
+  async getAllReadings() {
+    try {
+      const q = query(collection(db, COLLECTIONS.CROWD_READINGS), orderBy('timestamp', 'desc'));
+      const querySnapshot = await getDocs(q);
+      return querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    } catch (error) {
+      console.error('Error getting readings:', error);
+      throw error;
+    }
+  },
+
   // Subscribe to real-time readings
   subscribeToReadings(callback) {
     const q = query(collection(db, COLLECTIONS.CROWD_READINGS), orderBy('timestamp', 'desc'));
@@ -137,6 +149,12 @@ export const festivalsService = {
     }
   },
 
+  // Backward-compatible alias
+  async getAllFestivals() {
+    const querySnapshot = await getDocs(collection(db, COLLECTIONS.FESTIVALS));
+    return querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  },
+
   // Add festival
   async addFestival(festival) {
     try {
@@ -157,6 +175,17 @@ export const festivalsService = {
       console.error('Error updating festival:', error);
       throw error;
     }
+  },
+
+  // Delete festival
+  async deleteFestival(id) {
+    try {
+      const docRef = doc(db, COLLECTIONS.FESTIVALS, id);
+      await deleteDoc(docRef);
+    } catch (error) {
+      console.error('Error deleting festival:', error);
+      throw error;
+    }
   }
 };
 
@@ -173,6 +202,12 @@ export const routesService = {
     }
   },
 
+  // Backward-compatible alias
+  async getAllRoutes() {
+    const querySnapshot = await getDocs(collection(db, COLLECTIONS.ROUTES));
+    return querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  },
+
   // Add route
   async addRoute(route) {
     try {
@@ -180,6 +215,28 @@ export const routesService = {
       return { id: docRef.id, ...route };
     } catch (error) {
       console.error('Error adding route:', error);
+      throw error;
+    }
+  },
+
+  // Update route
+  async updateRoute(id, updates) {
+    try {
+      const docRef = doc(db, COLLECTIONS.ROUTES, id);
+      await updateDoc(docRef, updates);
+    } catch (error) {
+      console.error('Error updating route:', error);
+      throw error;
+    }
+  },
+
+  // Delete route
+  async deleteRoute(id) {
+    try {
+      const docRef = doc(db, COLLECTIONS.ROUTES, id);
+      await deleteDoc(docRef);
+    } catch (error) {
+      console.error('Error deleting route:', error);
       throw error;
     }
   }
