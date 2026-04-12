@@ -1,22 +1,4 @@
 import React, { createContext, useState, useContext, useEffect } from 'react';
-import { app as firebaseApp } from '@/services/firebase';
-
-let app = null;
-let auth = null;
-let googleProvider = null;
-
-const initializeFirebase = async () => {
-  if (auth) return;
-
-  try {
-    const { getAuth: getAuthFn, GoogleAuthProvider: GoogleProvider } = await import('firebase/auth');
-    app = firebaseApp;
-    auth = getAuthFn(app);
-    googleProvider = new GoogleProvider();
-  } catch (error) {
-    console.warn('Firebase initialization failed:', error);
-  }
-};
 
 const AuthContext = createContext();
 
@@ -118,43 +100,10 @@ export const AuthProvider = ({ children }) => {
   };
 
   const loginWithGoogle = async () => {
-    await initializeFirebase();
-
-    if (!auth) {
-      throw new Error('Google authentication is not ready. Check that Firebase Auth is enabled and the Firebase config matches this project.');
-    }
-
-    try {
-      const { signInWithPopup: signIn } = await import('firebase/auth');
-      const result = await signIn(auth, googleProvider);
-      const googleUser = {
-        id: result.user.uid,
-        name: result.user.displayName,
-        email: result.user.email,
-        avatar: result.user.photoURL,
-        role: 'user',
-        provider: 'google'
-      };
-
-      setUser(googleUser);
-      setIsAuthenticated(true);
-      setAuthError(null);
-      return googleUser;
-    } catch (error) {
-      throw new Error('Google sign-in failed: ' + error.message);
-    }
+    throw new Error('Google sign-in has been removed from this Firebase-free build.');
   };
 
   const logout = async () => {
-    if (auth) {
-      try {
-        const { signOut: signOutFn } = await import('firebase/auth');
-        await signOutFn(auth);
-      } catch (error) {
-        console.warn('Firebase sign out error:', error);
-      }
-    }
-
     setUser(null);
     setIsAuthenticated(false);
     setAuthError(null);

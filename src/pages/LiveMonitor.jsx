@@ -1,40 +1,24 @@
 import { useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Camera, RefreshCw, Upload, Bus, AlertTriangle, Zap, CheckCircle, Wifi, Smartphone, Globe, X, Plus } from 'lucide-react';
+import { Camera, RefreshCw, Bus, AlertTriangle, Zap, CheckCircle, X, Plus, Upload, Link as LinkIcon, Image as ImageIcon, Clock, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import CrowdBadge from '@/components/CrowdBadge';
 import { format } from 'date-fns';
+import { analyzePeopleCount } from '@/lib/people-detector';
 import { useToast } from '@/components/ui/use-toast';
-import { crowdReadingsService, busRequestsService, storageService } from '@/services/firebase';
+import { crowdReadingsService, busRequestsService, storageService, routesService } from '@/services/backend';
 
-const DEFAULT_ROUTES = [
-  { id: 'r1', name: 'Madurai → Bangalore', color: 'bg-blue-500' },
-  { id: 'r2', name: 'Madurai → Hyderabad', color: 'bg-purple-500' },
-  { id: 'r3', name: 'Madurai → Chennai', color: 'bg-green-500' },
-  { id: 'r4', name: 'Madurai → Coimbatore', color: 'bg-orange-500' },
-];
+const LIVE_MONITOR_SESSION_PREFIX = 'smartbus_live_monitor_session';
 
 // Location-specific thresholds
 const LOCATION_THRESHOLDS = {
   bus_stand: { normal: 40, festival: 80 },
-  inside_bus: { normal: 60, festival: 80 },
   front_inside_bus: { normal: 60, festival: 80 },
   back_inside_bus: { normal: 60, festival: 80 },
-};
-
-const getRoutes = () => {
-  try {
-    const saved = localStorage.getItem('routes');
-    if (saved) {
-      return JSON.parse(saved);
-    }
-  } catch (e) {
-    console.error('Failed to load routes from localStorage:', e);
-  }
-  return DEFAULT_ROUTES;
 };
 
 const LOCATION_LABELS = {
@@ -52,501 +36,493 @@ function getCrowdLevel(count, isFestival, location = 'bus_stand') {
 }
 
 function CameraCard({ route, location, isFestival, onReading, latestReading }) {
-  const [analyzing, setAnalyzing] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState(null);
-  const [result, setResult] = useState(null);
-  const [uploadMode, setUploadMode] = useState('file'); // 'file', 'online', 'mobile'
-  const [streamUrl, setStreamUrl] = useState('');
-  const [videoAnalysisProgress, setVideoAnalysisProgress] = useState(0);
-  const [isVideoFile, setIsVideoFile] = useState(false);
-  const canvasRef = useRef(null);
+  const sessionKey = `${LIVE_MONITOR_SESSION_PREFIX}:${route.id}:${location}`;
+  const persistedSession = (() => {
+    try {
+      const raw = localStorage.getItem(sessionKey);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  })();
+
+  const [liveCount, setLiveCount] = useState(() => persistedSession?.liveCount ?? latestReading?.people_count ?? null);
+  const [liveDetections, setLiveDetections] = useState(() => persistedSession?.liveDetections ?? []);
+  const [sourceDim, setSourceDim] = useState(() => persistedSession?.sourceDim ?? { width: 0, height: 0 });
+  const [liveStatus, setLiveStatus] = useState(() => persistedSession?.liveStatus ?? 'idle'); // 'idle', 'starting', 'live', 'analyzing', 'analyzed', 'error'
+  const [imageUrl, setImageUrl] = useState(() => persistedSession?.imageUrl ?? null);
+  const [uploadType, setUploadType] = useState(() => persistedSession?.uploadType ?? 'image'); // 'image' or 'video'
+  const [activeTab, setActiveTab] = useState(() => persistedSession?.activeTab ?? 'camera');
+  const [urlInput, setUrlInput] = useState(() => persistedSession?.urlInput ?? '');
+  const [isYoutube, setIsYoutube] = useState(false);
+  const [restoreTracking, setRestoreTracking] = useState(() => Boolean(persistedSession?.isTracking));
+
+  const checkYoutube = (url) => {
+    return url.includes('youtube.com/') || url.includes('youtu.be/');
+  };
+
+  useEffect(() => {
+    setIsYoutube(checkYoutube(urlInput));
+  }, [urlInput]);
+
   const videoRef = useRef(null);
+  const uploadVideoRef = useRef(null);
+  
+  const liveLoopRef = useRef(null);
+  const liveAnalysisInFlightRef = useRef(false);
   const { toast } = useToast();
 
   const label = LOCATION_LABELS[location] || location.replace('_', ' ');
   const cameraId = `cam-${route.id}-${location}`;
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        sessionKey,
+        JSON.stringify({
+          activeTab,
+          uploadType,
+          imageUrl,
+          urlInput,
+          liveCount,
+          liveDetections,
+          sourceDim,
+          liveStatus,
+          isTracking: activeTab === 'upload' && uploadType === 'video' && liveStatus === 'live',
+        })
+      );
+    } catch (error) {
+      console.error('Failed to persist live monitor session:', error);
+    }
+  }, [sessionKey, activeTab, uploadType, imageUrl, urlInput, liveCount, liveDetections, sourceDim, liveStatus]);
+
+  const stopCameraStream = () => {
+    if (liveLoopRef.current) {
+      clearInterval(liveLoopRef.current);
+      liveLoopRef.current = null;
+    }
+    liveAnalysisInFlightRef.current = false;
+
+    if (videoRef.current && videoRef.current.srcObject) {
+      videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+    }
+    if (activeTab === 'camera' || uploadType === 'video') {
+      setLiveStatus('idle');
+      if (activeTab === 'camera') {
+        setLiveCount(null);
+      }
+      setLiveDetections([]);
+      const routeName = route.source ? `${route.source} → ${route.destination}` : route.name;
+      onReading(route.id, routeName, location, 0, isFestival, null, true, true);
+    }
+    if (uploadType === 'video') {
+      setRestoreTracking(false);
+      if (uploadVideoRef.current) {
+        uploadVideoRef.current.pause();
+      }
+    }
+  };
+
+  const handleReset = () => {
+    stopCameraStream();
+    setImageUrl(null);
+    setLiveDetections([]);
+    setLiveCount(null);
+    setUrlInput('');
+    setLiveStatus('idle');
+    const routeName = route.source ? `${route.source} → ${route.destination}` : route.name;
+    onReading(route.id, routeName, location, 0, isFestival, null, true, true);
+  };
+
+  const startAnalysisLoop = (targetVideoRef) => {
+    if (liveLoopRef.current) clearInterval(liveLoopRef.current);
+    
+    const offscreenCanvas = document.createElement('canvas');
+    const ctx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
+    let tickCount = 0;
+
+    liveLoopRef.current = setInterval(async () => {
+      const video = targetVideoRef.current;
+      if (!video || video.readyState < 2 || liveAnalysisInFlightRef.current) return;
+
+      liveAnalysisInFlightRef.current = true;
+      try {
+        offscreenCanvas.width = video.videoWidth;
+        offscreenCanvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
+
+        const result = await analyzePeopleCount(offscreenCanvas, 0.25);
+        setLiveCount(result.count);
+        setLiveDetections(result.detections);
+        setSourceDim({ width: video.videoWidth, height: video.videoHeight });
+        setLiveStatus('live');
+        
+        // Push background reads to Dashboard every 5 seconds silently without spamming Toasts
+         if (tickCount % 10 === 0) {
+            const routeName = route.source ? `${route.source} → ${route.destination}` : route.name;
+            onReading(route.id, routeName, location, result.count, isFestival, null, true, false); // silent=true, skipVerif=false for live
+         }
+        tickCount++;
+      } catch (error) {
+        console.error('Detection error:', error);
+      } finally {
+        liveAnalysisInFlightRef.current = false;
+      }
+    }, 500);
+  };
+
   const startCamera = async () => {
     try {
+      setLiveStatus('starting');
       const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'environment' } // Use back camera on mobile
+        video: { facingMode: 'environment' } 
       });
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        await videoRef.current.play();
       }
+      startAnalysisLoop(videoRef);
     } catch (err) {
-      console.error('Error accessing camera:', err);
-      toast({
-        title: 'Camera Error',
-        description: 'Unable to access camera. Please check permissions.',
-        variant: 'destructive',
-      });
+      console.error('Camera Error:', err);
+      toast({ title: 'Camera Error', description: 'Could not access camera', variant: 'destructive' });
+      setLiveStatus('error');
+    }
+  };
+  
+  const startUploadedVideo = () => {
+    if (uploadVideoRef.current) {
+      uploadVideoRef.current.play();
+      setLiveStatus('starting');
+      setRestoreTracking(false);
+      startAnalysisLoop(uploadVideoRef);
     }
   };
 
-  const captureFromStream = () => {
-    if (videoRef.current && canvasRef.current) {
-      const canvas = canvasRef.current;
-      const video = videoRef.current;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(video, 0, 0);
-      
-      canvas.toBlob((blob) => {
-        const file = new File([blob], 'camera-capture.jpg', { type: 'image/jpeg' });
-        setIsVideoFile(false); // Mobile captures are always images
-        handleImageUpload({ target: { files: [file] } });
-      }, 'image/jpeg');
-    }
+  const analyzeStaticImage = async (url) => {
+    setLiveStatus('analyzing');
+    setImageUrl(url);
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = async () => {
+      try {
+        const result = await analyzePeopleCount(img, 0.35);
+        setLiveCount(result.count);
+        setLiveDetections(result.detections);
+        setSourceDim({ width: img.naturalWidth, height: img.naturalHeight });
+        setLiveStatus('analyzed');
+        const routeName = route.source ? `${route.source} → ${route.destination}` : route.name;
+        onReading(route.id, routeName, location, result.count, isFestival, url, false, true); // silent=false, skipVerif=true for static image
+      } catch (e) {
+        console.error(e);
+        toast({ title: 'Analysis Error', description: 'Failed to extract counts', variant: 'destructive' });
+        setLiveStatus('error');
+      }
+    };
+    img.onerror = () => {
+      if (checkYoutube(url)) {
+        setLiveStatus('live'); // Treat as live embed
+        setImageUrl(url);
+      } else {
+        toast({ title: 'Image Load Error', description: 'Could not load image. Check URL or CORS permissions.', variant: 'destructive' });
+        setLiveStatus('error');
+      }
+    };
+    img.src = url;
   };
 
-  const analyzeVideoFrames = async (file, videoUrl) => {
-    const video = document.createElement('video');
-    video.src = videoUrl;
-    video.preload = 'metadata';
-
-    return new Promise((resolve) => {
-      video.onloadedmetadata = async () => {
-        const duration = Math.floor(video.duration);
-        const frameResults = [];
-        let maxCount = 0;
-
-        // Analyze every second
-        for (let second = 0; second <= duration; second++) {
-          setVideoAnalysisProgress(Math.round((second / duration) * 100));
-          
-          video.currentTime = second;
-          
-          await new Promise((resolveFrame) => {
-            video.onseeked = () => {
-              // Create canvas to capture frame
-              const canvas = document.createElement('canvas');
-              const ctx = canvas.getContext('2d');
-              canvas.width = video.videoWidth;
-              canvas.height = video.videoHeight;
-              ctx.drawImage(video, 0, 0);
-              
-              // Mock AI analysis for this frame
-              const mockCount = Math.floor(Math.random() * 100) + 10;
-              const level = getCrowdLevel(mockCount, isFestival, location);
-              
-              frameResults.push({
-                time: second,
-                count: mockCount,
-                level,
-                timestamp: new Date().toISOString()
-              });
-              
-              maxCount = Math.max(maxCount, mockCount);
-              resolveFrame();
-            };
-          });
-
-          // Small delay to prevent overwhelming the browser
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-
-        setVideoAnalysisProgress(0); // Reset progress
-        
-        // Set result with time series data
-        const level = getCrowdLevel(maxCount, isFestival, location);
-        setResult({ 
-          count: maxCount, 
-          confidence: 'high', 
-          notes: `Video analysis: Peak ${maxCount} people detected. Analyzed ${frameResults.length} frames.`,
-          level, 
-          snapshot_url: videoUrl,
-          videoAnalysis: true,
-          timeSeries: frameResults,
-          duration
-        });
-        setAnalyzing(false);
-
-        // Log reading with max count and trigger bus request
-        await onReading(route.id, route.name, location, maxCount, isFestival, videoUrl);
-
-        resolve();
-      };
-    });
-  };
-
-  const handleImageUpload = async (e) => {
+  const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-
-    // Detect if file is video
+    
+    stopCameraStream(); // stop any active processes before loading new file
+    
     const isVideo = file.type.startsWith('video/');
-    setIsVideoFile(isVideo);
+    const uploadFn = isVideo ? storageService.uploadVideo : storageService.uploadImage;
+    const objectUrl = await uploadFn(file);
+    
+    setUploadType(isVideo ? 'video' : 'image');
+    setImageUrl(objectUrl);
+    setLiveStatus('idle');
+    setLiveCount(null);
+    setRestoreTracking(false);
+    
+    if (!isVideo) {
+      analyzeStaticImage(objectUrl);
+    }
+  };
 
-    // Show local preview
-    const localUrl = URL.createObjectURL(file);
-    setPreviewUrl(localUrl);
-    setAnalyzing(true);
-    setResult(null);
+  useEffect(() => {
+    if (activeTab !== 'camera' && activeTab !== 'upload') {
+      stopCameraStream();
+    } else if (activeTab === 'upload' && uploadType === 'image') {
+       stopCameraStream();
+    }
+  }, [activeTab, uploadType]);
 
-    if (isVideo) {
-      // Handle video analysis - count every second
-      await analyzeVideoFrames(file, localUrl);
-    } else {
-      // Handle image analysis (existing logic)
-      // Mock AI analysis (simulate processing time)
-      await new Promise(resolve => setTimeout(resolve, 2000));
-
-      // Mock AI result
-      const mockCount = Math.floor(Math.random() * 100) + 10;
-      const mockAiResult = {
-        people_count: mockCount,
-        confidence: 'high',
-        notes: `Mock analysis: ${mockCount} people detected at ${label}`
+  useEffect(() => {
+    if (
+      restoreTracking &&
+      activeTab === 'upload' &&
+      uploadType === 'video' &&
+      imageUrl &&
+      uploadVideoRef.current
+    ) {
+      const video = uploadVideoRef.current;
+      const tryResume = async () => {
+        try {
+          await video.play();
+          setLiveStatus('starting');
+          startAnalysisLoop(uploadVideoRef);
+          setLiveStatus('live');
+          setRestoreTracking(false);
+        } catch (error) {
+          console.error('Failed to resume video tracking:', error);
+        }
       };
 
-      const count = mockAiResult.people_count || 0;
-      const level = getCrowdLevel(count, isFestival, location);
-      setResult({ count, confidence: mockAiResult.confidence, notes: mockAiResult.notes, level, snapshot_url: localUrl });
-      setAnalyzing(false);
-
-      // Log reading and trigger bus request
-      await onReading(route.id, route.name, location, count, isFestival, localUrl);
-
-      // Reset file input
-      e.target.value = '';
+      if (video.readyState >= 2) {
+        tryResume();
+      } else {
+        const onLoaded = () => {
+          tryResume();
+          video.removeEventListener('loadeddata', onLoaded);
+        };
+        video.addEventListener('loadeddata', onLoaded);
+        return () => video.removeEventListener('loadeddata', onLoaded);
+      }
     }
-  };
+  }, [restoreTracking, activeTab, uploadType, imageUrl]);
 
-  const handleOnlineStream = async () => {
-    if (!streamUrl.trim()) {
-      toast({
-        title: 'URL Required',
-        description: 'Please enter a valid stream URL.',
-        variant: 'destructive',
-      });
-      return;
-    }
+  const currentLevel = liveCount !== null ? getCrowdLevel(liveCount, isFestival, location) : 'low';
 
-    setAnalyzing(true);
-    setResult(null);
-    setPreviewUrl(streamUrl);
-
-    // Mock AI analysis for online stream
-    await new Promise(resolve => setTimeout(resolve, 3000));
-
-    const mockCount = Math.floor(Math.random() * 100) + 10;
-    const mockAiResult = {
-      people_count: mockCount,
-      confidence: 'medium',
-      notes: `Live stream analysis: ${mockCount} people detected at ${label}`
-    };
-
-    const count = mockAiResult.people_count || 0;
-    const level = getCrowdLevel(count, isFestival, location);
-    setResult({ count, confidence: mockAiResult.confidence, notes: mockAiResult.notes, level, snapshot_url: streamUrl });
-    setAnalyzing(false);
-
-    await onReading(route.id, route.name, location, count, isFestival, streamUrl);
-  };
-
-  const currentCount = result?.count ?? latestReading?.people_count;
-  const currentLevel = result?.level ?? latestReading?.crowd_level ?? 'low';
-
-  const handleReset = () => {
-    setResult(null);
-    setPreviewUrl(null);
-    setStreamUrl('');
-    setIsVideoFile(false);
-    setVideoAnalysisProgress(0);
-    setAnalyzing(false);
+  const renderBoundingBoxes = (isObjectCover) => {
+    if (liveStatus === 'idle' || !liveDetections || liveDetections.length === 0 || !sourceDim.width) return null;
+    return (
+      <svg 
+        viewBox={`0 0 ${sourceDim.width} ${sourceDim.height}`}
+        className="absolute inset-0 w-full h-full pointer-events-none z-10"
+        preserveAspectRatio={isObjectCover ? "xMidYMid slice" : "xMidYMid meet"}
+      >
+        {liveDetections.map((det, i) => (
+          <g key={i}>
+            <rect 
+              x={det.box.xmin} 
+              y={det.box.ymin} 
+              width={det.box.xmax - det.box.xmin} 
+              height={det.box.ymax - det.box.ymin} 
+              fill="none" 
+              stroke="#22c55e" 
+              strokeWidth={Math.max(2, sourceDim.width * 0.005)} 
+              rx={Math.max(2, sourceDim.width * 0.005)}
+            />
+            <text 
+              x={det.box.xmin} 
+              y={Math.max(0, det.box.ymin - 5)} 
+              fill="#22c55e" 
+              fontSize={Math.max(14, sourceDim.width * 0.025)}
+              fontWeight="bold"
+            >
+              {Math.round(det.score * 100)}%
+            </text>
+          </g>
+        ))}
+      </svg>
+    );
   };
 
   return (
-    <div className={`bg-card rounded-2xl border shadow-sm overflow-hidden ${currentLevel === 'critical' ? 'border-red-300 ring-1 ring-red-200' : 'border-border'}`}>
-      {/* Header */}
+    <div className={`bg-card rounded-2xl border shadow-sm flex flex-col overflow-hidden ${currentLevel === 'critical' ? 'border-red-300 ring-1 ring-red-200' : 'border-border'}`}>
       <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
         <div className="flex items-center gap-2">
           <Camera className="w-4 h-4 text-accent" />
           <span className="text-xs font-semibold text-foreground">{label}</span>
         </div>
         <div className="flex items-center gap-2">
-          {analyzing ? (
-            <span className="flex items-center gap-1.5 text-xs text-accent font-medium">
-              <RefreshCw className="w-3 h-3 animate-spin" /> 
-              {isVideoFile ? 'Analyzing Video…' : 'Analyzing…'}
-            </span>
-          ) : (
-            <span className="flex items-center gap-1.5 text-xs text-green-600 font-medium">
-              <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" /> Live
-            </span>
-          )}
-          <div className="absolute top-2 right-2" />
+          <button 
+            onClick={handleReset}
+            className="p-1 hover:bg-muted rounded-md transition-colors text-muted-foreground hover:text-accent group"
+            title="Reset Camera"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+          </button>
+          {(liveStatus === 'starting' || liveStatus === 'analyzing') && <span className="text-xs text-accent"><RefreshCw className="w-3 h-3 animate-spin inline mr-1"/>Processing...</span>}
+          {liveStatus === 'live' && <span className="text-xs text-red-500 font-medium tracking-wide flex items-center"><span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse mr-1.5" /> LIVE</span>}
+          {liveStatus === 'analyzed' && <span className="text-xs text-green-600 font-medium"><CheckCircle className="w-3 h-3 inline mr-1" /> Logged</span>}
         </div>
       </div>
 
-      {/* Camera view */}
-      <div className="relative bg-slate-900 aspect-video flex items-center justify-center overflow-hidden">
-        {uploadMode === 'mobile' && !previewUrl && (
-          <video 
-            ref={videoRef} 
-            autoPlay 
-            playsInline 
-            muted 
-            className="w-full h-full object-cover"
-          />
-        )}
-        {previewUrl ? (
-          uploadMode === 'online' ? (
-            streamUrl.startsWith('http') ? (
-              <img src={streamUrl} alt="Live Stream" className="w-full h-full object-cover" />
-            ) : streamUrl.startsWith('rtsp') ? (
-              <div className="w-full h-full flex flex-col items-center justify-center bg-slate-800 gap-3">
-                <AlertTriangle className="w-8 h-8 text-yellow-500" />
-                <p className="text-white text-sm font-medium">RTSP Stream Detected</p>
-                <p className="text-white/60 text-xs max-w-xs text-center">
-                  RTSP streams require conversion. Try using HLS (m3u8) or HTTP stream URL instead, or set up an RTSP-to-HLS gateway.
-                </p>
-                <p className="text-white/40 text-xs mt-2">{streamUrl}</p>
-              </div>
-            ) : (
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full flex-1 flex flex-col">
+          <TabsList className="grid w-full grid-cols-3 rounded-none border-b h-auto select-none p-0 bg-transparent">
+            <TabsTrigger value="camera" className="text-xs py-2.5 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-accent data-[state=active]:bg-accent/5"><Camera className="w-3 h-3 mr-1.5"/>Mobile</TabsTrigger>
+            <TabsTrigger value="upload" className="text-xs py-2.5 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-accent data-[state=active]:bg-accent/5"><Upload className="w-3 h-3 mr-1.5"/>File</TabsTrigger>
+            <TabsTrigger value="url" className="text-xs py-2.5 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-accent data-[state=active]:bg-accent/5"><LinkIcon className="w-3 h-3 mr-1.5"/>Link</TabsTrigger>
+          </TabsList>
+          
+          {/* Mobile Tab */}
+          <TabsContent value="camera" className="m-0 border-none p-0 flex-col flex flex-1 focus-visible:outline-none">
+            <div className="relative bg-slate-900 aspect-video flex items-center justify-center overflow-hidden">
               <video 
-                src={streamUrl} 
-                autoPlay 
+                ref={videoRef} 
+                playsInline 
                 muted 
-                playsInline
-                className="w-full h-full object-cover"
+                className={`w-full h-full object-cover ${liveStatus === 'idle' ? 'hidden' : 'block'}`}
               />
-            )
-          ) : (
-            isVideoFile ? (
-              <video 
-                src={previewUrl} 
-                controls 
-                className="w-full h-full object-cover"
-                preload="metadata"
-              />
-            ) : (
-              <img src={previewUrl} alt="Camera feed" className="w-full h-full object-cover" />
-            )
-          )
-        ) : (
-          <div className="text-center">
-            <Camera className="w-10 h-10 text-slate-600 mx-auto mb-2" />
-            <p className="text-slate-500 text-xs">No feed yet</p>
-            <p className="text-slate-600 text-xs mt-0.5">Choose upload method below</p>
-          </div>
-        )}
-
-        {/* Hidden canvas for mobile capture */}
-        <canvas ref={canvasRef} className="hidden" />
-
-        {/* Overlay badges */}
-        <div className="absolute top-2 left-2 bg-red-600 text-white text-xs px-2 py-0.5 rounded font-medium">● LIVE</div>
-        <div className="absolute top-2 right-2 bg-black/50 text-white text-xs px-2 py-0.5 rounded">{cameraId}</div>
-
-        {/* Count overlay */}
-        {currentCount !== undefined && (
-          <div className="absolute bottom-2 left-2 bg-black/70 text-white rounded-lg px-3 py-1.5 flex items-center gap-2">
-            <span className="text-lg font-bold">{currentCount}</span>
-            <span className="text-xs text-white/70">people</span>
-          </div>
-        )}
-
-        {analyzing && (
-          <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-2">
-            <Zap className="w-8 h-8 text-accent animate-pulse" />
-            <p className="text-white text-sm font-medium">
-              {isVideoFile ? 'AI Analyzing Video Frames…' : 'AI Counting People…'}
-            </p>
-            <p className="text-white/60 text-xs">
-              {isVideoFile ? `Processing every second of video ${videoAnalysisProgress}%` : 'Analyzing camera feed'}
-            </p>
-            {isVideoFile && (
-              <div className="w-32 h-1 bg-white/20 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-accent transition-all duration-300" 
-                  style={{ width: `${videoAnalysisProgress}%` }}
-                />
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Upload mode selector */}
-      <div className="px-4 py-2 border-b border-border">
-        <div className="flex gap-1">
-          <button
-            onClick={() => setUploadMode('file')}
-            className={`flex-1 px-2 py-1.5 rounded text-xs font-medium transition-all ${
-              uploadMode === 'file' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'
-            }`}
-          >
-            <Upload className="w-3 h-3 inline mr-1" />
-            File
-          </button>
-          <button
-            onClick={() => setUploadMode('online')}
-            className={`flex-1 px-2 py-1.5 rounded text-xs font-medium transition-all ${
-              uploadMode === 'online' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'
-            }`}
-          >
-            <Globe className="w-3 h-3 inline mr-1" />
-            Online
-          </button>
-          <button
-            onClick={() => setUploadMode('mobile')}
-            className={`flex-1 px-2 py-1.5 rounded text-xs font-medium transition-all ${
-              uploadMode === 'mobile' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'
-            }`}
-          >
-            <Smartphone className="w-3 h-3 inline mr-1" />
-            Mobile
-          </button>
-          <button
-            onClick={handleReset}
-            className="px-2 py-1.5 rounded text-xs font-medium transition-all bg-destructive/10 text-destructive hover:bg-destructive/20"
-            title="Reset all uploads"
-          >
-            <X className="w-3 h-3 inline mr-1" />
-            Reset
-          </button>
-        </div>
-      </div>
-
-      {/* Upload controls */}
-      <div className="px-4 py-3 space-y-2">
-        {uploadMode === 'file' && (
-          <label className={`flex items-center justify-center gap-2 w-full py-2.5 rounded-xl text-sm font-medium cursor-pointer transition-all ${
-            analyzing
-              ? 'bg-muted text-muted-foreground cursor-not-allowed'
-              : 'bg-primary text-primary-foreground hover:bg-primary/90'
-          }`}>
-            <Upload className="w-3.5 h-3.5" />
-            {analyzing ? (isVideoFile ? 'Analyzing Video Frames…' : 'Analyzing…') : 'Upload Photo/Video'}
-            <input type="file" accept="image/*,video/*" className="hidden" onChange={handleImageUpload} disabled={analyzing} />
-          </label>
-        )}
-
-        {uploadMode === 'online' && (
-          <div className="space-y-2">
-            <input
-              type="url"
-              placeholder="Enter stream URL (RTSP/HTTP)"
-              value={streamUrl}
-              onChange={(e) => setStreamUrl(e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background"
-            />
-            <Button 
-              onClick={handleOnlineStream} 
-              disabled={analyzing || !streamUrl.trim()}
-              className="w-full"
-              size="sm"
-            >
-              <Wifi className="w-3.5 h-3.5 mr-1.5" />
-              {analyzing ? 'Analyzing Stream…' : 'Analyze Live Stream'}
-            </Button>
-          </div>
-        )}
-
-
-
-        {uploadMode === 'mobile' && (
-          <div className="space-y-2">
-            <Button 
-              onClick={startCamera} 
-              disabled={analyzing}
-              className="w-full"
-              size="sm"
-              variant="outline"
-            >
-              <Smartphone className="w-3.5 h-3.5 mr-1.5" />
-              Start Mobile Camera
-            </Button>
-            {videoRef.current?.srcObject && (
-              <Button 
-                onClick={captureFromStream} 
-                disabled={analyzing}
-                className="w-full"
-                size="sm"
-              >
-                <Camera className="w-3.5 h-3.5 mr-1.5" />
-                {analyzing ? 'Analyzing…' : 'Capture & Analyze'}
-              </Button>
-            )}
-          </div>
-        )}
-
-        {previewUrl && (
-          <Button
-            onClick={handleReset}
-            variant="outline"
-            className="w-full text-xs"
-            size="sm"
-          >
-            <X className="w-3 h-3 mr-1.5" />
-            Reset Upload
-          </Button>
-        )}
-
-        {/* Result / Status */}
-        {result && (
-          <div className={`rounded-xl p-3 text-xs space-y-2 ${currentLevel === 'critical' ? 'bg-red-50 border border-red-200' : 'bg-muted/50'}`}>
-            <div className="flex items-center justify-between">
-              <span className="font-semibold text-foreground">AI Detection Result</span>
-              <CrowdBadge level={result.level} />
-            </div>
-            <p className="text-muted-foreground">{result.notes}</p>
-            <p className="text-muted-foreground">Confidence: <span className="font-medium capitalize">{result.confidence}</span></p>
-            <Button
-              onClick={handleReset}
-              size="sm"
-              variant="outline"
-              className="w-full mt-2 text-xs"
-            >
-              <X className="w-3 h-3 mr-1.5" />
-              Clear Reading
-            </Button>
-          </div>
-        )}
-
-        {result?.videoAnalysis && result?.timeSeries && (
-          <div className="mt-3 p-3 bg-muted/50 rounded-lg">
-            <h4 className="text-sm font-medium mb-2">Video Analysis Timeline</h4>
-            <div className="space-y-1 max-h-32 overflow-y-auto">
-              {result.timeSeries.map((frame, index) => (
-                <div key={index} className="flex items-center justify-between text-xs">
-                  <span className="text-muted-foreground">{frame.time}s:</span>
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{frame.count} people</span>
-                    <CrowdBadge level={frame.level} />
-                  </div>
+              {renderBoundingBoxes(true)}
+              
+              {liveStatus === 'idle' && (
+                <div className="text-center">
+                  <Camera className="w-10 h-10 text-slate-600 mx-auto mb-2" />
+                  <p className="text-slate-500 text-xs">Camera inactive</p>
                 </div>
-              ))}
-            </div>
-            <div className="mt-2 pt-2 border-t border-border">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">Peak count:</span>
-                <span className="font-bold text-primary">{result.count} people</span>
-              </div>
-              <div className="flex items-center justify-between text-xs mt-1">
-                <span className="text-muted-foreground">Duration:</span>
-                <span>{result.duration}s</span>
-              </div>
-            </div>
-          </div>
-        )}
+              )}
 
-        {!result && latestReading && (
-          <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span>Last scan: {format(new Date(latestReading.created_date), 'h:mm a')}</span>
-            <CrowdBadge level={latestReading.crowd_level} />
-          </div>
-        )}
-      </div>
+
+              
+              {liveCount !== null && (
+                <div className="absolute bottom-2 left-2 bg-black/70 text-white rounded-lg px-3 py-1.5 flex items-center gap-2 shadow-lg backdrop-blur-sm">
+                  <span className="text-lg font-bold">{liveCount}</span>
+                  <span className="text-xs text-white/70">people</span>
+                </div>
+              )}
+            </div>
+            <div className="px-4 py-3 space-y-2 bg-card">
+              {liveStatus === 'idle' ? (
+                <Button onClick={startCamera} className="w-full shadow-sm" size="sm"><Camera className="w-3.5 h-3.5 mr-1.5" /> Start Surveillance</Button>
+              ) : (
+                <Button onClick={stopCameraStream} variant="outline" className="w-full text-xs" size="sm"><X className="w-3 h-3 mr-1.5" /> Stop Camera</Button>
+              )}
+            </div>
+          </TabsContent>
+
+          {/* Upload Tab */}
+          <TabsContent value="upload" className="m-0 border-none p-0 flex-col flex flex-1 focus-visible:outline-none">
+            <div className="relative bg-slate-900/90 aspect-video flex items-center justify-center overflow-hidden border-b border-border/50">
+               {imageUrl ? (
+                 uploadType === 'video' ? (
+                   <video ref={uploadVideoRef} src={imageUrl} muted autoPlay={false} playsInline loop controls className="w-full h-full object-contain bg-black" />
+                 ) : (
+                   <img src={imageUrl} alt="Uploaded" className="w-full h-full object-cover" />
+                 )
+               ) : (
+                 <div className="text-center text-slate-500">
+                   <ImageIcon className="w-8 h-8 mx-auto mb-2 opacity-50"/>
+                   <span className="text-xs">Upload Image or Video</span>
+                 </div>
+               )}
+               {renderBoundingBoxes(uploadType !== 'video')}
+               {imageUrl && liveCount !== null && (
+                 <div className="absolute bottom-2 left-2 bg-black/70 text-white rounded-lg px-3 py-1.5 flex items-center gap-2 shadow-lg backdrop-blur-sm pointer-events-none">
+                    <span className="text-lg font-bold">{liveCount}</span>
+                    <span className="text-xs text-white/70">people</span>
+                 </div>
+               )}
+            </div>
+            <div className="px-4 py-3 bg-card space-y-2">
+               <div className="flex gap-2">
+                 <Button onClick={() => document.getElementById('file-upload-' + cameraId).click()} className="flex-1" size="sm" variant="secondary" disabled={liveStatus === 'analyzing'}>
+                   <Upload className="w-3.5 h-3.5 mr-1.5" /> 
+                   {liveStatus === 'analyzing' ? 'Analyzing...' : 'Choose File'}
+                 </Button>
+                 {uploadType === 'video' && imageUrl && (
+                    <Button onClick={liveStatus === 'live' ? stopCameraStream : startUploadedVideo} variant={liveStatus === 'live' ? "outline" : "default"} size="sm" className="flex-1">
+                      {liveStatus === 'live' ? <X className="w-3 h-3 mr-1.5" /> : <Camera className="w-3 h-3 mr-1.5" />}
+                      {liveStatus === 'live' ? 'Stop Tracking' : 'Track Video'}
+                    </Button>
+                 )}
+               </div>
+               <input id={'file-upload-' + cameraId} type="file" accept="image/*,video/*" className="hidden" onChange={handleFileUpload} />
+            </div>
+          </TabsContent>
+
+          {/* Link Tab */}
+          <TabsContent value="url" className="m-0 border-none p-0 flex-col flex flex-1 focus-visible:outline-none">
+            <div className="relative bg-slate-900/90 aspect-video flex items-center justify-center overflow-hidden border-b border-border/50">
+               {imageUrl ? (
+                 isYoutube ? (
+                   <iframe
+                     src={imageUrl.replace('watch?v=', 'embed/').replace('live/', 'embed/')}
+                     className="w-full h-full border-none"
+                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                     allowFullScreen
+                   />
+                 ) : (
+                   <img src={imageUrl} alt="Linked url" className="w-full h-full object-cover" />
+                 )
+               ) : (
+                 <div className="text-center text-slate-500">
+                   <LinkIcon className="w-8 h-8 mx-auto mb-2 opacity-50"/>
+                   <span className="text-xs">Enter an image or YouTube URL</span>
+                 </div>
+               )}
+               {!isYoutube && renderBoundingBoxes(true)}
+               {imageUrl && liveCount !== null && !isYoutube && (
+                 <div className="absolute bottom-2 left-2 bg-black/70 text-white rounded-lg px-3 py-1.5 flex items-center gap-2 shadow-lg backdrop-blur-sm">
+                    <span className="text-lg font-bold">{liveCount}</span>
+                    <span className="text-xs text-white/70">people</span>
+                 </div>
+               )}
+               {isYoutube && (
+                 <div className="absolute top-2 right-2 bg-black/60 text-white text-[10px] px-2 py-1 rounded-md backdrop-blur-sm">
+                   Live Embed - AI Analysis Limited
+                 </div>
+               )}
+            </div>
+            <div className="px-4 py-3 flex gap-2 bg-card">
+               <Input 
+                 value={urlInput} 
+                 onChange={e => setUrlInput(e.target.value)} 
+                 placeholder="https://..." 
+                 className="flex-1 text-xs h-8" 
+                 onKeyDown={e => e.key === 'Enter' && urlInput && analyzeStaticImage(urlInput)}
+               />
+               <Button 
+                 onClick={() => urlInput && analyzeStaticImage(urlInput)} 
+                 size="sm" 
+                 variant="secondary"
+                 className="h-8 shrink-0" 
+                 disabled={!urlInput || liveStatus === 'analyzing'}
+               >
+                 {liveStatus === 'analyzing' ? 'Analyzing...' : 'Load'}
+               </Button>
+            </div>
+          </TabsContent>
+      </Tabs>
     </div>
   );
 }
 
 export default function LiveMonitor() {
-  const [selectedRoute, setSelectedRoute] = useState('r1');
+  const { data: ROUTES_RAW = [], refetch: refetchRoutes } = useQuery({
+    queryKey: ['routes'],
+    queryFn: async () => await routesService.getRoutes(),
+    refetchInterval: 5000,
+  });
+
+  const ROUTES = ROUTES_RAW.filter((route, index, list) => {
+    const key = `${route.source || route.name}|${route.destination}`;
+    return index === list.findIndex(item => `${item.source || item.name}|${item.destination}` === key);
+  });
+
+  const [selectedRoute, setSelectedRoute] = useState(null);
+  const [liveClock, setLiveClock] = useState(format(new Date(), 'h:mm:ss a'));
+  const inFlightRequestsRef = useRef(new Set());
+  const lastRequestTimeRef = useRef({}); // { routeId: timestamp } 15s cooldown
+  const highCrowdTimersRef = useRef({}); // { 'routeId-location': timestamp } 20s sustained requirement
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setLiveClock(format(new Date(), 'h:mm:ss a'));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+  
+  useEffect(() => {
+    if (ROUTES.length > 0 && (!selectedRoute || !ROUTES.find(r => r.id === selectedRoute))) {
+      setSelectedRoute(ROUTES[0].id);
+    }
+  }, [ROUTES, selectedRoute]);
+
   const [isFestival, setIsFestival] = useState(() => {
     const saved = localStorage.getItem('festivalMode');
     return saved ? JSON.parse(saved) : false;
@@ -559,17 +535,19 @@ export default function LiveMonitor() {
 
   // Clear old readings once on first app load to remove defaults
   useEffect(() => {
-    const appVersion = localStorage.getItem('appVersion');
-    if (appVersion !== '2.0') {
-      localStorage.removeItem('crowdReadings');
-      localStorage.removeItem('busRequests');
-      localStorage.setItem('appVersion', '2.0');
+    const v = localStorage.getItem('appVersionV3');
+    if (v !== 'true') {
+      localStorage.removeItem('smartbus_crowdReadings');
+      localStorage.removeItem('smartbus_busRequests');
+      localStorage.removeItem('smartbus_live_monitor_session');
+      localStorage.setItem('appVersionV3', 'true');
     }
   }, []);
 
   const { data: readings = [], refetch } = useQuery({
     queryKey: ['crowd-readings'],
     queryFn: async () => {
+      if (!selectedRoute) return [];
       try {
         return await crowdReadingsService.getReadingsByRoute(selectedRoute);
       } catch (error) {
@@ -591,20 +569,6 @@ export default function LiveMonitor() {
       }
     },
   });
-
-  // Save readings to localStorage when they change
-  useEffect(() => {
-    if (readings && readings.length > 0) {
-      localStorage.setItem('crowdReadings', JSON.stringify(readings));
-    }
-  }, [readings]);
-
-  // Save requests to localStorage when they change
-  useEffect(() => {
-    if (requests && requests.length > 0) {
-      localStorage.setItem('busRequests', JSON.stringify(requests));
-    }
-  }, [requests]);
 
   // Save festival mode to localStorage when it changes
   useEffect(() => {
@@ -650,7 +614,7 @@ export default function LiveMonitor() {
 
     await createRequest.mutateAsync({
       route_id: selectedRoute,
-      route_name: route.name,
+      route_name: route.source ? `${route.source} → ${route.destination}` : route.name,
       location: 'bus_stand',
       buses_requested: buses,
       reason: manualReason || 'Manually deployed by operator',
@@ -669,26 +633,8 @@ export default function LiveMonitor() {
     setManualReason('');
   };
 
-  const handleReading = async (routeId, routeName, location, count, festival, snapshotUrl) => {
+  const handleReading = async (routeId, routeName, location, count, festival, snapshotUrl, silent = false, skipVerification = false) => {
     const level = getCrowdLevel(count, festival, location);
-
-    // Upload image to Firebase Storage if it's a local file
-    let finalSnapshotUrl = snapshotUrl;
-    if (snapshotUrl && snapshotUrl.startsWith('blob:')) {
-      try {
-        const response = await fetch(snapshotUrl);
-        const blob = await response.blob();
-        const fileName = `crowd-readings/${routeId}/${location}/${Date.now()}.jpg`;
-        finalSnapshotUrl = await storageService.uploadImage(blob, fileName);
-      } catch (error) {
-        console.error('Error uploading image:', error);
-        toast({
-          title: 'Upload Error',
-          description: 'Failed to upload image to cloud storage.',
-          variant: 'destructive',
-        });
-      }
-    }
 
     // Map location for storage
     const locationMap = {
@@ -705,42 +651,95 @@ export default function LiveMonitor() {
       people_count: count,
       crowd_level: level,
       is_festival_day: festival,
-      snapshot_url: finalSnapshotUrl,
+      snapshot_url: snapshotUrl,
       created_date: new Date().toISOString(),
     });
 
-    // Auto-trigger extra bus request based on location-specific thresholds
-    const locationThreshold = LOCATION_THRESHOLDS[location]?.[festival ? 'festival' : 'normal'] || 40;
+    const route = ROUTES.find(r => r.id === routeId);
+    let locationThreshold = LOCATION_THRESHOLDS[location]?.[festival ? 'festival' : 'normal'] || 40;
+    
+    // Override with route-specific thresholds if available
+    if (route) {
+       const isStand = location === 'bus_stand';
+       const routeThreshold = festival 
+         ? (isStand ? route.stand_festival_threshold : route.bus_festival_threshold)
+         : (isStand ? route.stand_threshold : route.bus_threshold);
+       
+       // Fallback to old generic thresholds if specialized ones are missing
+       const fallback = festival ? route.festival_threshold : route.normal_threshold;
+       
+       if (routeThreshold || fallback) {
+         locationThreshold = Number(routeThreshold || fallback);
+       }
+    }
 
     if (count >= locationThreshold) {
-      const alreadyPending = requests.some(r => r.route_id === routeId && r.status === 'pending');
-      if (!alreadyPending) {
-        const extra = Math.ceil((count - locationThreshold) / 40) + 1;
+      // 20s Sustained Detection Logic
+      const timerKey = `${routeId}-${location}`;
+      if (!highCrowdTimersRef.current[timerKey]) {
+        highCrowdTimersRef.current[timerKey] = Date.now();
+      }
+      
+      const sustainedDuration = (Date.now() - highCrowdTimersRef.current[timerKey]) / 1000;
+      
+      if (!skipVerification && sustainedDuration < 20) {
+         if (!silent) toast({ 
+           title: '⏳ Verifying Crowd Density...', 
+           description: `Maintaining threshold for ${Math.round(sustainedDuration)}s. Request auto-sends at 20s.` 
+         });
+         return; // Do not send request yet
+      }
+
+      const alreadyPendingRemote = requests.some(r => r.route_id === routeId && r.status === 'pending');
+      const alreadyPendingLocal = inFlightRequestsRef.current.has(routeId);
+      
+      const now = Date.now();
+      const lastSent = lastRequestTimeRef.current[routeId] || 0;
+      const isCoolingDown = (now - lastSent) < 15000; // 15 second cooldown
+
+      if (!alreadyPendingRemote && !alreadyPendingLocal && !isCoolingDown) {
+        // Lock this route immediately globally for this session
+        inFlightRequestsRef.current.add(routeId);
+        lastRequestTimeRef.current[routeId] = now;
+        
+        const extra = Math.ceil((count - locationThreshold) / 20) + 1; 
         await createRequest.mutateAsync({
           route_id: routeId,
           route_name: routeName,
           people_count: count,
           location,
           buses_requested: extra,
-          reason: `Camera detected ${count} people at ${LOCATION_LABELS[location] || location} — exceeds location threshold of ${locationThreshold}`,
+          reason: `Camera detected ${count} people — exceeds ${festival ? 'Festival' : 'Normal'} threshold of ${locationThreshold}`,
           is_festival_day: festival,
           requested_at: new Date().toISOString(),
         });
+
+        // Small delay to ensure the remote query has time to reflect the new request
+        setTimeout(() => {
+          inFlightRequestsRef.current.delete(routeId);
+        }, 3000);
+
         toast({
           title: '🚌 Auto Bus Deployed!',
-          description: `${extra} bus(es) auto-deployed for ${routeName} at ${LOCATION_LABELS[location] || location}. Awaiting admin approval.`,
+          description: `${extra} bus(es) auto-deployed for ${routeName}. Awaiting admin approval.`,
           variant: 'destructive',
         });
       } else {
-        toast({ title: 'Reading Logged', description: `${count} people — ${level.toUpperCase()} crowd. Request already pending.` });
+        if (!silent) toast({ 
+          title: 'Deployment Suppressed', 
+          description: `Crowd (${count}) is above threshold, but a request for ${routeName} is already pending approval.` 
+        });
       }
     } else {
+      // Reset timer if count drops below threshold
+      const timerKey = `${routeId}-${location}`;
+      delete highCrowdTimersRef.current[timerKey];
+
       const locationLabel = LOCATION_LABELS[location] || location.replace('_', ' ');
-      toast({ title: 'Camera Reading Logged', description: `${count} people at ${locationLabel} — ${level} crowd level.` });
+      if (!silent) toast({ title: 'Reading Logged', description: `${count} people at ${locationLabel} — status OK (Threshold: ${locationThreshold}).` });
     }
   };
 
-  const ROUTES = getRoutes();
   const route = ROUTES.find(r => r.id === selectedRoute);
   const routeReadings = readings.filter(r => r.route_id === selectedRoute).slice(0, 8);
   const getLatest = (routeId, loc) => readings.filter(r => r.route_id === routeId && r.location === loc)[0];
@@ -751,7 +750,12 @@ export default function LiveMonitor() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-foreground">Live Camera Monitor</h1>
-          <p className="text-muted-foreground text-sm mt-0.5">Upload camera snapshots — AI counts people & auto-requests extra buses</p>
+          <div className="flex items-center gap-2 text-muted-foreground text-sm mt-0.5">
+            <Clock className="w-3.5 h-3.5" />
+            <span className="tabular-nums font-medium">{liveClock}</span>
+            <span className="opacity-40 select-none mx-1">|</span>
+            <span>Live tracking with location-based alerts</span>
+          </div>
         </div>
         <div className="flex items-center gap-3 flex-wrap">
           <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
@@ -770,29 +774,46 @@ export default function LiveMonitor() {
           >
             <Plus className="w-3.5 h-3.5 mr-1.5" /> Deploy Buses
           </Button>
-          <Button variant="outline" size="sm" onClick={() => refetch()}>
+          <Button variant="outline" size="sm" onClick={() => { refetch(); refetchRoutes(); }}>
             <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Refresh
           </Button>
         </div>
       </div>
 
-      {/* How it works */}
-      <div className="bg-accent/10 border border-accent/20 rounded-2xl p-4 flex items-start gap-3">
-        <Zap className="w-5 h-5 text-accent flex-shrink-0 mt-0.5" />
-        <div className="text-sm">
-          <p className="font-semibold text-foreground">AI-Powered Camera Analysis with Location-Based Alerts</p>
-          <p className="text-muted-foreground text-xs mt-0.5">
-            Auto-deploys buses based on location thresholds:<br/>
-            • <strong>Bus Stand:</strong> {isFestival ? '80' : '40'} people threshold<br/>
-            • <strong>Inside Bus:</strong> {isFestival ? '80' : '60'} people threshold
+      {/* Deployment Thresholds Info */}
+      <div className="bg-accent/10 border border-accent/20 rounded-2xl p-4 flex items-start gap-4 shadow-sm">
+        <Zap className="w-6 h-6 text-accent flex-shrink-0 mt-0.5" />
+        <div className="text-sm flex-1">
+          <p className="font-bold text-accent mb-1 tracking-tight flex items-center gap-2">
+            Adaptive Logic Active — {ROUTES.find(r => r.id === selectedRoute)?.source} Feed
           </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-2">
+            <div className="bg-background/50 rounded-xl p-3 border border-accent/10">
+              <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">Bus Stand Trigger</p>
+              <p className="font-bold text-foreground">
+                {isFestival 
+                  ? (ROUTES.find(r => r.id === selectedRoute)?.stand_festival_threshold || '80') 
+                  : (ROUTES.find(r => r.id === selectedRoute)?.stand_threshold || '40')} people
+              </p>
+            </div>
+            <div className="bg-background/50 rounded-xl p-3 border border-accent/10">
+              <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">Inside Bus Trigger</p>
+              <p className="font-bold text-foreground">
+                {isFestival 
+                  ? (ROUTES.find(r => r.id === selectedRoute)?.bus_festival_threshold || '80') 
+                  : (ROUTES.find(r => r.id === selectedRoute)?.bus_threshold || '60')} people
+              </p>
+            </div>
+          </div>
         </div>
       </div>
 
       {isFestival && (
         <div className="flex items-center gap-3 bg-orange-50 border border-orange-200 rounded-xl px-4 py-3">
           <AlertTriangle className="w-4 h-4 text-orange-600 flex-shrink-0" />
-          <p className="text-sm text-orange-700">Festival mode active — Alert thresholds: Bus Stand fires at <strong>80 people</strong>, Inside Bus at <strong>80 people</strong>.</p>
+          <p className="text-sm text-orange-700">
+            Festival mode active — Using festival threshold of <strong>{ROUTES.find(r => r.id === selectedRoute)?.festival_threshold || '80'} people</strong> for this route.
+          </p>
         </div>
       )}
 
@@ -806,7 +827,10 @@ export default function LiveMonitor() {
             <div>
               <label className="text-sm font-medium">Route</label>
               <div className="mt-1 p-3 bg-muted rounded-lg text-sm">
-                {ROUTES.find(r => r.id === selectedRoute)?.name}
+                {(() => {
+                  const r = ROUTES.find(r => r.id === selectedRoute);
+                  return r ? (r.source ? `${r.source} → ${r.destination}` : r.name) : 'Unknown Route';
+                })()}
               </div>
             </div>
             <div>
@@ -859,13 +883,13 @@ export default function LiveMonitor() {
                   : 'bg-card border border-border text-muted-foreground hover:text-foreground hover:border-primary/50'
               }`}
             >
-              <span className={`w-2 h-2 rounded-full ${r.color}`} />
-              {r.name}
+              <span className={`w-2 h-2 rounded-full ${r.color || 'bg-primary'}`} />
+              {r.source ? `${r.source} → ${r.destination}` : r.name}
             </button>
           ))
         ) : (
           <div className="w-full text-center py-4 text-muted-foreground">
-            <p className="text-sm">No routes configured yet.</p>
+            <p className="text-sm">No routes configured yet. Add them in the Routes tab.</p>
           </div>
         )}
       </div>
@@ -876,33 +900,41 @@ export default function LiveMonitor() {
           <Camera className="w-4 h-4 text-accent" />
           {route?.name || 'Select a route'} — Camera Feeds
         </h2>
-        {route ? (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <CameraCard
-            route={route}
-            location="bus_stand"
-            isFestival={isFestival}
-            onReading={handleReading}
-            latestReading={getLatest(route.id, 'bus_stand')}
-          />
-          <CameraCard
-            route={route}
-            location="front_inside_bus"
-            isFestival={isFestival}
-            onReading={handleReading}
-            latestReading={getLatest(route.id, 'front_inside_bus')}
-          />
-          <CameraCard
-            route={route}
-            location="back_inside_bus"
-            isFestival={isFestival}
-            onReading={handleReading}
-            latestReading={getLatest(route.id, 'back_inside_bus')}
-          />
-        </div>
+        {ROUTES.length > 0 ? (
+          ROUTES.map(routeData => (
+            <div 
+              key={routeData.id} 
+              className={selectedRoute === routeData.id ? 'grid grid-cols-1 md:grid-cols-3 gap-4' : 'hidden'}
+            >
+              <CameraCard
+                key={`${routeData.id}-bus_stand`}
+                route={routeData}
+                location="bus_stand"
+                isFestival={isFestival}
+                onReading={handleReading}
+                latestReading={getLatest(routeData.id, 'bus_stand')}
+              />
+              <CameraCard
+                key={`${routeData.id}-front_inside_bus`}
+                route={routeData}
+                location="front_inside_bus"
+                isFestival={isFestival}
+                onReading={handleReading}
+                latestReading={getLatest(routeData.id, 'front_inside_bus')}
+              />
+              <CameraCard
+                key={`${routeData.id}-back_inside_bus`}
+                route={routeData}
+                location="back_inside_bus"
+                isFestival={isFestival}
+                onReading={handleReading}
+                latestReading={getLatest(routeData.id, 'back_inside_bus')}
+              />
+            </div>
+          ))
         ) : (
           <div className="text-center py-10 text-muted-foreground">
-            <p className="text-sm">No routes available. Please configure routes first.</p>
+            <p className="text-sm">No routes available or selected.</p>
           </div>
         )}
       </div>
@@ -913,7 +945,7 @@ export default function LiveMonitor() {
         {routeReadings.length === 0 ? (
           <div className="text-center py-10 text-muted-foreground bg-card rounded-2xl border border-border">
             <Camera className="w-8 h-8 mx-auto mb-2 opacity-30" />
-            <p className="text-sm">No camera readings yet. Upload a snapshot above.</p>
+            <p className="text-sm">No camera readings yet for this route.</p>
           </div>
         ) : (
           <div className="bg-card rounded-2xl border border-border overflow-hidden shadow-sm">
@@ -947,7 +979,7 @@ export default function LiveMonitor() {
                           </span>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-muted-foreground text-xs">{format(new Date(r.created_date), 'h:mm a')}</td>
+                      <td className="px-4 py-3 text-muted-foreground text-xs">{format(new Date(r.created_date), 'MMM d, h:mm a')}</td>
                     </tr>
                   );
                 })}

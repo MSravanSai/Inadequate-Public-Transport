@@ -1,13 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Plus, Calendar, Trash2, Star } from 'lucide-react';
+import { Plus, Calendar, Trash2, Star, Clock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { format } from 'date-fns';
 import { useToast } from '@/components/ui/use-toast';
-import { festivalsService } from '@/services/firebase';
+import { festivalsService } from '@/services/backend';
 
 const SAMPLE_FESTIVALS = [
   { name: 'Dussehra', date: '2026-10-02', description: 'Major Hindu festival' },
@@ -19,22 +19,42 @@ const SAMPLE_FESTIVALS = [
 
 const empty = { name: '', date: '', description: '', is_active: true };
 
+const syncFestivalData = async ({ queryClient, toast, showToast = false } = {}) => {
+  const cleanupResult = await festivalsService.removeDuplicateFestivals();
+  const seedResult = await festivalsService.seedSampleFestivals(SAMPLE_FESTIVALS);
+
+  if (cleanupResult.deleted || seedResult.added) {
+    await queryClient.invalidateQueries({ queryKey: ['festival-days'] });
+  }
+
+  if (showToast && seedResult.added) {
+    toast({ title: 'Sample festivals added' });
+  }
+
+  return { cleanupResult, seedResult };
+};
+
 export default function Festivals() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(empty);
-  const autoSeededRef = useRef(false);
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [liveClock, setLiveClock] = useState(format(new Date(), 'h:mm:ss a'));
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setLiveClock(format(new Date(), 'h:mm:ss a'));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   const { data: festivals = [], isLoading } = useQuery({
     queryKey: ['festival-days'],
     queryFn: () => festivalsService.getFestivals(),
   });
 
-  const uniqueFestivals = festivals.filter((festival, index, list) => {
-    const key = `${festival.name}|${festival.date}`;
-    return index === list.findIndex(item => `${item.name}|${item.date}` === key);
-  });
+  const uniqueFestivals = festivalsService.getUniqueFestivals(festivals);
+  const today = format(new Date(), 'yyyy-MM-dd');
 
   const create = useMutation({
     mutationFn: (data) => festivalsService.addFestival(data),
@@ -62,44 +82,77 @@ export default function Festivals() {
     },
   });
 
+  useEffect(() => {
+    if (isLoading) return;
+
+    syncFestivalData({ queryClient, toast }).catch(error => {
+      console.error('Failed to sync festival data:', error);
+    });
+  }, [isLoading, queryClient, toast]);
+
   const handleSeed = async () => {
-    const existingKeys = new Set(uniqueFestivals.map(f => `${f.name}|${f.date}`));
-    const missing = SAMPLE_FESTIVALS.filter(f => !existingKeys.has(`${f.name}|${f.date}`));
-
-    if (!missing.length) return;
-
-    const seeded = missing.map(f => ({
-      ...f,
-      is_active: false,
-    }));
-
-    await Promise.all(seeded.map(festival => festivalsService.addFestival(festival)));
-    queryClient.invalidateQueries({ queryKey: ['festival-days'] });
-    toast({ title: 'Sample festivals added' });
+    await syncFestivalData({ queryClient, toast, showToast: true });
   };
 
-  useEffect(() => {
-    if (!isLoading && !autoSeededRef.current) {
-      const existingKeys = new Set(uniqueFestivals.map(f => `${f.name}|${f.date}`));
-      const missing = SAMPLE_FESTIVALS.filter(f => !existingKeys.has(`${f.name}|${f.date}`));
-      if (!missing.length) return;
-      autoSeededRef.current = true;
-      handleSeed();
-    }
-  }, [handleSeed, isLoading, uniqueFestivals]);
+  const renderFestivalCard = (festival) => {
+    const isToday = festival.date === today;
 
-  const today = format(new Date(), 'yyyy-MM-dd');
+    return (
+      <div
+        key={festival.id}
+        className={`bg-card rounded-2xl border p-4 shadow-sm ${
+          isToday ? 'border-orange-300 ring-1 ring-orange-200' : 'border-border'
+        } ${!festival.is_active ? 'opacity-50' : ''}`}
+      >
+        <div className="flex items-start justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <span className="text-lg">🎉</span>
+            <div>
+              <p className="font-semibold text-sm text-foreground">{festival.name}</p>
+              {isToday && <span className="text-xs text-orange-600 font-medium">Today!</span>}
+            </div>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="w-6 h-6 text-destructive hover:bg-destructive/10"
+            onClick={() => remove.mutate(festival.id)}
+          >
+            <Trash2 className="w-3 h-3" />
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground mb-3">
+          {festival.date} {festival.description && `· ${festival.description}`}
+        </p>
+        <button
+          onClick={() => toggle.mutate({ id: festival.id, is_active: !festival.is_active })}
+          className={`w-full text-xs py-1.5 rounded-lg font-medium transition-all ${
+            festival.is_active ? 'bg-green-100 text-green-700' : 'bg-muted text-muted-foreground'
+          }`}
+        >
+          {festival.is_active ? 'Active' : 'Inactive'}
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-foreground">Festival Days</h1>
-          <p className="text-muted-foreground text-sm mt-0.5">Lower crowd thresholds apply on these days</p>
+          <div className="flex items-center gap-2 text-muted-foreground text-sm mt-0.5">
+            <Clock className="w-3.5 h-3.5" />
+            <span className="tabular-nums font-medium">{liveClock}</span>
+            <span className="opacity-40 select-none mx-1">|</span>
+            <span>Lower crowd thresholds apply on these days</span>
+          </div>
         </div>
         <div className="flex gap-2">
           {uniqueFestivals.length === 0 && (
-            <Button variant="outline" size="sm" onClick={handleSeed}>Seed Sample</Button>
+            <Button variant="outline" size="sm" onClick={handleSeed}>
+              Seed Sample
+            </Button>
           )}
           <Button size="sm" onClick={() => { setForm(empty); setOpen(true); }}>
             <Plus className="w-4 h-4 mr-1.5" /> Add Festival
@@ -113,7 +166,9 @@ export default function Festivals() {
         </div>
         <div>
           <p className="text-sm font-medium text-foreground">Festival Mode Thresholds</p>
-          <p className="text-xs text-muted-foreground">On festival days, extra buses are triggered at <strong>85 people</strong> instead of the normal 60.</p>
+          <p className="text-xs text-muted-foreground">
+            On festival days, extra buses are triggered at <strong>85 people</strong> instead of the normal 60.
+          </p>
         </div>
       </div>
 
@@ -127,43 +182,50 @@ export default function Festivals() {
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-          {uniqueFestivals.map(f => {
-            const isToday = f.date === today;
-            return (
-              <div key={f.id} className={`bg-card rounded-2xl border p-4 shadow-sm ${isToday ? 'border-orange-300 ring-1 ring-orange-200' : 'border-border'} ${!f.is_active ? 'opacity-50' : ''}`}>
-                <div className="flex items-start justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-lg">🎉</span>
-                    <div>
-                      <p className="font-semibold text-sm text-foreground">{f.name}</p>
-                      {isToday && <span className="text-xs text-orange-600 font-medium">Today!</span>}
-                    </div>
-                  </div>
-                  <Button variant="ghost" size="icon" className="w-6 h-6 text-destructive hover:bg-destructive/10" onClick={() => remove.mutate(f.id)}>
-                    <Trash2 className="w-3 h-3" />
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground mb-3">{f.date} {f.description && `· ${f.description}`}</p>
-                <button
-                  onClick={() => toggle.mutate({ id: f.id, is_active: !f.is_active })}
-                  className={`w-full text-xs py-1.5 rounded-lg font-medium transition-all ${f.is_active ? 'bg-green-100 text-green-700' : 'bg-muted text-muted-foreground'}`}
-                >
-                  {f.is_active ? 'Active' : 'Inactive'}
-                </button>
-              </div>
-            );
-          })}
+          {uniqueFestivals.map(renderFestivalCard)}
         </div>
       )}
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-sm">
-          <DialogHeader><DialogTitle>Add Festival Day</DialogTitle></DialogHeader>
+          <DialogHeader>
+            <DialogTitle>Add Festival Day</DialogTitle>
+          </DialogHeader>
           <div className="space-y-3">
-            <div><Label className="text-xs">Festival Name</Label><Input placeholder="e.g. Diwali" value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} className="mt-1" /></div>
-            <div><Label className="text-xs">Date</Label><Input type="date" value={form.date} onChange={e => setForm(p => ({ ...p, date: e.target.value }))} className="mt-1" /></div>
-            <div><Label className="text-xs">Description (optional)</Label><Input placeholder="Brief description" value={form.description} onChange={e => setForm(p => ({ ...p, description: e.target.value }))} className="mt-1" /></div>
-            <Button className="w-full mt-2" onClick={() => create.mutate(form)} disabled={!form.name || !form.date || create.isPending}>Add Festival</Button>
+            <div>
+              <Label className="text-xs">Festival Name</Label>
+              <Input
+                placeholder="e.g. Diwali"
+                value={form.name}
+                onChange={e => setForm(p => ({ ...p, name: e.target.value }))}
+                className="mt-1"
+              />
+            </div>
+            <div>
+              <Label className="text-xs">Date</Label>
+              <Input
+                type="date"
+                value={form.date}
+                onChange={e => setForm(p => ({ ...p, date: e.target.value }))}
+                className="mt-1"
+              />
+            </div>
+            <div>
+              <Label className="text-xs">Description (optional)</Label>
+              <Input
+                placeholder="Brief description"
+                value={form.description}
+                onChange={e => setForm(p => ({ ...p, description: e.target.value }))}
+                className="mt-1"
+              />
+            </div>
+            <Button
+              className="w-full mt-2"
+              onClick={() => create.mutate(form)}
+              disabled={!form.name || !form.date || create.isPending}
+            >
+              Add Festival
+            </Button>
           </div>
         </DialogContent>
       </Dialog>

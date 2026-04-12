@@ -1,12 +1,12 @@
 import { useState, useEffect } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
 import { CheckCircle, XCircle, Bus, Clock, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { format } from 'date-fns';
 import { useToast } from '@/components/ui/use-toast';
-import { busRequestsService } from '@/services/firebase';
+import { busRequestsService } from '@/services/backend';
 
 const STATUS_CONFIG = {
   pending: { label: 'Pending', class: 'bg-yellow-100 text-yellow-700 border-yellow-200' },
@@ -19,43 +19,35 @@ export default function BusRequests() {
   const [filter, setFilter] = useState('all');
   const [selected, setSelected] = useState(null);
   const [adminNotes, setAdminNotes] = useState('');
-  const [requests, setRequests] = useState([]);
+  
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [liveClock, setLiveClock] = useState(format(new Date(), 'h:mm:ss a'));
 
-  // Load from Firebase on mount
   useEffect(() => {
-    const loadRequests = async () => {
-      try {
-        const data = await busRequestsService.getAllRequests();
-        setRequests(data);
-      } catch (error) {
-        console.error('Failed to load bus requests:', error);
-      }
-    };
-    loadRequests();
-
-    // Subscribe to real-time updates
-    const unsubscribe = busRequestsService.subscribeToRequests((updatedRequests) => {
-      setRequests(updatedRequests);
-    });
-
-    return () => unsubscribe();
+    const timer = setInterval(() => {
+      setLiveClock(format(new Date(), 'h:mm:ss a'));
+    }, 1000);
+    return () => clearInterval(timer);
   }, []);
+
+  const { data: requests = [] } = useQuery({
+    queryKey: ['extra-bus-requests'],
+    queryFn: () => busRequestsService.getAllRequests(),
+    refetchInterval: 5000,
+  });
 
   const updateRequest = useMutation({
     mutationFn: ({ id, data }) => busRequestsService.updateRequest(id, data),
-    onSuccess: ({ id, data }) => {
-      setRequests(prev => prev.map(req => req.id === id ? { ...req, ...data } : req));
+    onSuccess: () => {
       setSelected(null);
       setAdminNotes('');
-      // Invalidate queries to refresh data across components
       queryClient.invalidateQueries({ queryKey: ['extra-bus-requests'] });
-      queryClient.invalidateQueries({ queryKey: ['crowd-readings'] });
     },
   });
 
   const handleDecision = async (status) => {
+    if (!selected) return;
     await updateRequest.mutateAsync({
       id: selected.id,
       data: {
@@ -65,13 +57,8 @@ export default function BusRequests() {
       },
     });
     toast({
-      title:
-        status === 'approved'
-          ? 'Request Approved'
-          : status === 'rejected'
-          ? 'Request Rejected'
-          : 'Request Updated',
-      description: `Extra bus request for ${selected?.route_name || selected?.route_id} has been ${status}.`,
+      title: status === 'approved' ? 'Request Approved' : 'Request Updated',
+      description: `Task updated successfully.`,
     });
   };
 
@@ -83,7 +70,12 @@ export default function BusRequests() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-foreground">Extra Bus Requests</h1>
-          <p className="text-muted-foreground text-sm mt-0.5">Admin approval panel</p>
+          <div className="flex items-center gap-2 text-muted-foreground text-sm mt-0.5">
+            <Clock className="w-3.5 h-3.5" />
+            <span className="tabular-nums font-medium">{liveClock}</span>
+            <span className="opacity-40 select-none mx-1">|</span>
+            <span>Admin approval panel</span>
+          </div>
         </div>
         {pending > 0 && (
           <div className="flex items-center gap-2 bg-orange-50 border border-orange-200 rounded-xl px-4 py-2">
@@ -93,7 +85,6 @@ export default function BusRequests() {
         )}
       </div>
 
-      {/* Filter tabs */}
       <div className="flex gap-2 flex-wrap">
         {['all', 'pending', 'approved', 'rejected', 'deployed'].map(s => (
           <button
@@ -103,19 +94,16 @@ export default function BusRequests() {
               filter === s ? 'bg-primary text-primary-foreground' : 'bg-card border border-border text-muted-foreground hover:text-foreground'
             }`}
           >
-            {s === 'all' ? 'All' : s}
-            {s === 'pending' && pending > 0 && (
-              <span className="ml-1.5 bg-orange-500 text-white text-xs rounded-full w-4 h-4 inline-flex items-center justify-center">{pending}</span>
-            )}
+            {s}
+            {s === 'pending' && pending > 0 && <span className="ml-2 px-1.5 bg-orange-500 text-white text-[10px] rounded-full">{pending}</span>}
           </button>
         ))}
       </div>
 
-      {/* Requests list */}
       {filtered.length === 0 ? (
         <div className="text-center py-16 bg-card rounded-2xl border border-border">
           <Bus className="w-10 h-10 mx-auto mb-3 text-muted-foreground/30" />
-          <p className="text-muted-foreground text-sm">No requests found. Bus requests will appear here when cameras detect crowds exceeding thresholds.</p>
+          <p className="text-muted-foreground text-sm">No requests found in this category.</p>
         </div>
       ) : (
         <div className="space-y-3">
@@ -130,25 +118,29 @@ export default function BusRequests() {
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-3">
                   <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${
-                    req.status === 'pending' ? 'bg-orange-100' : req.status === 'approved' ? 'bg-green-100' : 'bg-muted'
+                    req.status === 'pending' ? 'bg-orange-100' : 'bg-muted'
                   }`}>
-                    <Bus className={`w-5 h-5 ${req.status === 'pending' ? 'text-orange-600' : req.status === 'approved' ? 'text-green-600' : 'text-muted-foreground'}`} />
+                    <Bus className={`w-5 h-5 ${req.status === 'pending' ? 'text-orange-600' : 'text-muted-foreground'}`} />
                   </div>
                   <div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <p className="font-semibold text-sm text-foreground">{req.route_name}</p>
-                      {req.is_festival_day && (
-                        <span className="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded-full">Festival</span>
-                      )}
-                    </div>
+                    <p className="font-semibold text-sm text-foreground">{req.route_name}</p>
                     <p className="text-xs text-muted-foreground mt-0.5">{req.reason}</p>
                     <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
-                      <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{format(new Date(req.created_date), 'MMM d, h:mm a')}</span>
-                      <span>{req.people_count} people · {req.buses_requested} bus(es) requested</span>
+                      <span className="flex items-center gap-1">
+                        <Clock className="w-3 h-3" />
+                        {(() => {
+                           try {
+                             return req.created_date ? format(new Date(req.created_date), 'MMM d, h:mm a') : 'Recently';
+                           } catch {
+                             return 'Recently';
+                           }
+                        })()}
+                      </span>
+                      <span>{req.people_count} people · {req.buses_requested} requested</span>
                     </div>
                   </div>
                 </div>
-                <span className={`px-2.5 py-1 rounded-full text-xs font-semibold border flex-shrink-0 ${STATUS_CONFIG[req.status]?.class}`}>
+                <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase border ${STATUS_CONFIG[req.status]?.class}`}>
                   {STATUS_CONFIG[req.status]?.label}
                 </span>
               </div>
@@ -157,60 +149,30 @@ export default function BusRequests() {
         </div>
       )}
 
-      {/* Decision Dialog */}
       {selected && (
         <Dialog open={!!selected} onOpenChange={() => setSelected(null)}>
-          <DialogContent className="max-w-md">
-            <DialogHeader>
-              <DialogTitle>Extra Bus Request</DialogTitle>
-            </DialogHeader>
+          <DialogContent>
+            <DialogHeader><DialogTitle>Request Details</DialogTitle></DialogHeader>
             <div className="space-y-4">
-              <div className="bg-muted/50 rounded-xl p-4 space-y-2 text-sm">
-                <div className="flex justify-between"><span className="text-muted-foreground">Route</span><span className="font-medium">{selected.route_name}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">People Count</span><span className="font-bold text-lg">{selected.people_count}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Location</span><span className="capitalize">{selected.location?.replace('_', ' ')}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Buses Requested</span><span className="font-medium">{selected.buses_requested}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Day Type</span><span>{selected.is_festival_day ? '🎉 Festival' : 'Normal'}</span></div>
+              <div className="bg-muted p-4 rounded-xl text-sm space-y-1">
+                <div className="flex justify-between"><span>Route</span><span className="font-bold">{selected.route_name}</span></div>
+                <div className="flex justify-between"><span>People</span><span className="font-bold">{selected.people_count}</span></div>
+                <div className="flex justify-between"><span>Requested</span><span className="font-bold">{selected.buses_requested} buses</span></div>
               </div>
-              <p className="text-sm text-muted-foreground">{selected.reason}</p>
               <div>
-                <label className="text-sm font-medium text-foreground mb-1.5 block">Admin Notes</label>
-                <Textarea
-                  value={adminNotes}
-                  onChange={e => setAdminNotes(e.target.value)}
-                  placeholder="Add notes..."
-                  rows={3}
-                  disabled={selected.status !== 'pending'}
-                />
+                <label className="text-xs font-bold uppercase text-muted-foreground">Admin Notes</label>
+                <Textarea value={adminNotes} onChange={e => setAdminNotes(e.target.value)} rows={3} className="mt-1" />
               </div>
-              {selected.status === 'pending' && (
-                <div className="flex gap-3">
-                  <Button
-                    className="flex-1 bg-green-600 hover:bg-green-700 text-white"
-                    onClick={() => handleDecision('approved')}
-                    disabled={updateRequest.isPending}
-                  >
-                    <CheckCircle className="w-4 h-4 mr-2" /> Approve
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className="flex-1 border-red-300 text-red-600 hover:bg-red-50"
-                    onClick={() => handleDecision('rejected')}
-                    disabled={updateRequest.isPending}
-                  >
-                    <XCircle className="w-4 h-4 mr-2" /> Reject
-                  </Button>
-                </div>
-              )}
-              {selected.status === 'approved' && (
-                <Button
-                  className="w-full bg-blue-600 hover:bg-blue-700 text-white"
-                  onClick={() => handleDecision('deployed')}
-                  disabled={updateRequest.isPending}
-                >
-                  <Bus className="w-4 h-4 mr-2" /> Mark as Deployed
-                </Button>
-              )}
+              <div className="flex gap-2">
+                {selected.status === 'pending' ? (
+                  <>
+                    <Button className="flex-1 bg-green-600" onClick={() => handleDecision('approved')}>Approve</Button>
+                    <Button variant="outline" className="flex-1 text-red-600 border-red-200" onClick={() => handleDecision('rejected')}>Reject</Button>
+                  </>
+                ) : selected.status === 'approved' ? (
+                  <Button className="w-full bg-blue-600" onClick={() => handleDecision('deployed')}>Mark Deployed</Button>
+                ) : null}
+              </div>
             </div>
           </DialogContent>
         </Dialog>
