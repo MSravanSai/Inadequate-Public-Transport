@@ -673,6 +673,13 @@ export default function LiveMonitor() {
     }
 
     if (count >= locationThreshold) {
+      // Only auto-deploy buses based on the bus stand camera count
+      if (location !== 'bus_stand') {
+        const locationLabel = LOCATION_LABELS[location] || location.replace('_', ' ');
+        if (!silent) toast({ title: 'High Crowd Logged', description: `${count} people at ${locationLabel} (Threshold: ${locationThreshold}) — Auto-deploy restricted to bus stand.` });
+        return;
+      }
+
       // 20s Sustained Detection Logic
       const timerKey = `${routeId}-${location}`;
       if (!highCrowdTimersRef.current[timerKey]) {
