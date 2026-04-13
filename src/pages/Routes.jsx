@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useToast } from '@/components/ui/use-toast';
-import { routesService } from '@/services/backend';
+import { routesService, terminalsService } from '@/services/backend';
 import { BUS_STANDS } from '@/config';
 
 const DEFAULT_ROUTES = [
@@ -38,7 +38,11 @@ export default function Routes() {
   const queryClient = useQueryClient();
   const [liveClock, setLiveClock] = useState(format(new Date(), 'h:mm:ss a'));
   const currentStandId = localStorage.getItem('selectedTerminal') || 'madurai';
-  const stand = BUS_STANDS.find(s => s.id === currentStandId) || BUS_STANDS[0];
+  const { data: terminals = BUS_STANDS } = useQuery({
+    queryKey: ['terminals'],
+    queryFn: () => terminalsService.getTerminals(),
+  });
+  const stand = terminals.find(s => s.id === currentStandId) || terminals[0] || BUS_STANDS[0];
 
   useEffect(() => {
     const timer = setInterval(() => {

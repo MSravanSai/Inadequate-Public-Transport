@@ -372,8 +372,7 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
               
               {liveStatus === 'idle' && (
                 <div className="text-center">
-                  <Camera className="w-10 h-10 text-slate-600 mx-auto mb-2" />
-                  <p className="text-slate-500 text-xs">Camera inactive</p>
+                  <Camera className="w-10 h-10 text-slate-800/10 mx-auto" />
                 </div>
               )}
 
@@ -407,7 +406,7 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
                ) : (
                  <div className="text-center text-slate-500">
                    <ImageIcon className="w-8 h-8 mx-auto mb-2 opacity-50"/>
-                   <span className="text-xs">Upload Image or Video</span>
+                   <span className="text-xs"></span>
                  </div>
                )}
                {renderBoundingBoxes(uploadType !== 'video')}
@@ -452,7 +451,7 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
                ) : (
                  <div className="text-center text-slate-500">
                    <LinkIcon className="w-8 h-8 mx-auto mb-2 opacity-50"/>
-                   <span className="text-xs">Enter an image or YouTube URL</span>
+                   <span className="text-xs"></span>
                  </div>
                )}
                {!isYoutube && renderBoundingBoxes(true)}
@@ -690,7 +689,9 @@ export default function LiveMonitor() {
          return; // Do not send request yet
       }
 
-      const alreadyPendingRemote = requests.some(r => r.route_id === routeId && r.status === 'pending');
+      // Check live pending status directly from the local DB avoiding React state race conditions
+      const currentRequests = await busRequestsService.getAllRequests();
+      const alreadyPendingRemote = currentRequests.some(r => r.route_id === routeId && r.status === 'pending');
       const alreadyPendingLocal = inFlightRequestsRef.current.has(routeId);
       
       const now = Date.now();
@@ -702,7 +703,7 @@ export default function LiveMonitor() {
         inFlightRequestsRef.current.add(routeId);
         lastRequestTimeRef.current[routeId] = now;
         
-        const extra = Math.ceil((count - locationThreshold) / 20) + 1; 
+        const extra = 1 + Math.floor((count - locationThreshold) / 40); 
         await createRequest.mutateAsync({
           route_id: routeId,
           route_name: routeName,
@@ -714,10 +715,13 @@ export default function LiveMonitor() {
           requested_at: new Date().toISOString(),
         });
 
+        // Require another full 20s interval hold before attempting another dispatch
+        delete highCrowdTimersRef.current[timerKey];
+
         // Small delay to ensure the remote query has time to reflect the new request
         setTimeout(() => {
           inFlightRequestsRef.current.delete(routeId);
-        }, 3000);
+        }, 5000);
 
         toast({
           title: '🚌 Auto Bus Deployed!',
@@ -725,9 +729,11 @@ export default function LiveMonitor() {
           variant: 'destructive',
         });
       } else {
+        // Reset the timer so it doesn't endlessly spam while suppressed, requiring 20s to check again
+        delete highCrowdTimersRef.current[timerKey];
         if (!silent) toast({ 
           title: 'Deployment Suppressed', 
-          description: `Crowd (${count}) is above threshold, but a request for ${routeName} is already pending approval.` 
+          description: `Crowd (${count}) is above threshold, but a request for ${routeName} is already pending approval or cooling down.` 
         });
       }
     } else {

@@ -4,6 +4,7 @@ const STORAGE_KEYS = {
   FESTIVALS: 'smartbus_festivals',
   ROUTES: 'smartbus_routes',
   USERS: 'smartbus_users',
+  TERMINALS: 'smartbus_terminals',
 };
 
 export const COLLECTIONS = {
@@ -304,6 +305,47 @@ export const routesService = {
   async deleteRoute(id) {
     const routes = loadCollection(STORAGE_KEYS.ROUTES).filter(route => route.id !== id);
     saveCollection(STORAGE_KEYS.ROUTES, routes);
+  },
+};
+
+export const terminalsService = {
+  async getTerminals() {
+    let terminals = loadCollection(STORAGE_KEYS.TERMINALS);
+    if (terminals.length === 0) {
+      // Import from config but we avoid circular deps by hardcoding defaults here as fallback
+      terminals = [
+        { id: 'madurai', city: 'Madurai', name: 'Madurai Central Terminal', short: 'Madurai' },
+        { id: 'bangalore', city: 'Bangalore', name: 'Majestic Bus Stand', short: 'Bangalore' },
+        { id: 'chennai', city: 'Chennai', name: 'Koyambedu Terminus', short: 'Chennai' },
+        { id: 'coimbatore', city: 'Coimbatore', name: 'Gandhipuram Stand', short: 'Coimbatore' },
+      ];
+      saveCollection(STORAGE_KEYS.TERMINALS, terminals);
+    }
+    return terminals;
+  },
+
+  async addTerminal(terminal) {
+    const terminals = loadCollection(STORAGE_KEYS.TERMINALS);
+    const payload = {
+      id: terminal.city?.toLowerCase().replace(/\s+/g, '-') || uid(),
+      ...terminal,
+      createdAt: new Date().toISOString(),
+    };
+    terminals.push(payload);
+    saveCollection(STORAGE_KEYS.TERMINALS, terminals);
+    return payload;
+  },
+
+  async updateTerminal(id, updates) {
+    const terminals = loadCollection(STORAGE_KEYS.TERMINALS).map(t =>
+      t.id === id ? { ...t, ...updates, updatedAt: new Date().toISOString() } : t
+    );
+    saveCollection(STORAGE_KEYS.TERMINALS, terminals);
+  },
+
+  async deleteTerminal(id) {
+    const terminals = loadCollection(STORAGE_KEYS.TERMINALS).filter(t => t.id !== id);
+    saveCollection(STORAGE_KEYS.TERMINALS, terminals);
   },
 };
 

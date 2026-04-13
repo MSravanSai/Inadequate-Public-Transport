@@ -246,7 +246,9 @@ export default function PublicView() {
                 <div className="flex items-center gap-2.5">
                   <Bus className="w-5 h-5 text-primary" />
                   <div>
-                    <p className="font-semibold text-sm text-foreground">{route.name}</p>
+                    <p className="font-semibold text-sm text-foreground uppercase tracking-tight">
+                      {route.name || <>{route.source} <span className="text-muted-foreground/40 mx-1">→</span> {route.destination}</>}
+                    </p>
                     <p className="text-xs text-muted-foreground flex items-center gap-1"><Clock className="w-3 h-3" />~{estimatedHours}h journey ({route.distance_km} km)</p>
                   </div>
                 </div>

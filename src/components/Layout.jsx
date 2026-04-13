@@ -1,12 +1,14 @@
 import { Outlet, Link, useLocation } from 'react-router-dom';
-import { Bus, Camera, LayoutDashboard, AlertCircle, Calendar, Users, Menu, X, LogOut, MapPin } from 'lucide-react';
+import { Bus, Camera, LayoutDashboard, AlertCircle, Calendar, Users, Menu, X, LogOut, MapPin, Plus } from 'lucide-react';
 import { useState } from 'react';
 import { useAuth } from '@/lib/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import LiveMonitor from '@/pages/LiveMonitor';
 import { APP_CONFIG, BUS_STANDS } from '@/config';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueryClient, useQuery } from '@tanstack/react-query';
+import { terminalsService } from '@/services/backend';
+import { ModeToggle } from '@/components/mode-toggle';
 
 const navItems = [
   { path: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -23,8 +25,13 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const queryClient = useQueryClient();
   
-  const [activeStandId, setActiveStandId] = useState(() => localStorage.getItem('selectedTerminal') || BUS_STANDS[0].id);
-  const stand = BUS_STANDS.find(s => s.id === activeStandId) || BUS_STANDS[0];
+  const { data: terminals = BUS_STANDS } = useQuery({
+    queryKey: ['terminals'],
+    queryFn: () => terminalsService.getTerminals(),
+  });
+
+  const [activeStandId, setActiveStandId] = useState(() => localStorage.getItem('selectedTerminal') || terminals[0]?.id || BUS_STANDS[0].id);
+  const stand = terminals.find(s => s.id === activeStandId) || terminals[0] || BUS_STANDS[0];
 
   const handleStandChange = (id) => {
     setActiveStandId(id);
@@ -55,9 +62,14 @@ export default function Layout() {
 
         {/* Stand Selector */}
         <div className="px-3 py-4 border-b border-sidebar-border opacity-100 lg:opacity-0 group-hover:lg:opacity-100 transition-opacity duration-300 overflow-hidden">
-           <label className="text-[10px] font-bold text-sidebar-foreground/40 uppercase tracking-widest px-3 mb-2 block">Switch Terminal</label>
-           <div className="space-y-1">
-             {BUS_STANDS.map(s => (
+           <div className="flex items-center justify-between px-3 mb-2">
+             <label className="text-[10px] font-bold text-sidebar-foreground/40 uppercase tracking-widest block">Switch Terminal</label>
+             <Button variant="ghost" size="icon" className="w-6 h-6 rounded-full bg-sidebar-accent/30 hover:bg-accent/30 text-sidebar-foreground/60 hover:text-accent h-0 lg:h-6 lg:opacity-100 opacity-0 transition-opacity shrink-0" asChild>
+                <Link to="/terminals"><Plus className="w-3.5 h-3.5" /></Link>
+             </Button>
+           </div>
+           <div className="space-y-1 max-h-[160px] overflow-y-auto custom-scrollbar pr-1 pb-1">
+             {terminals.map(s => (
                <button
                  key={s.id}
                  onClick={() => handleStandChange(s.id)}
@@ -96,18 +108,7 @@ export default function Layout() {
 
         {/* User Profile */}
         <div className="p-4 border-t border-sidebar-border mt-auto">
-          <div className="flex items-center gap-4 px-[6px] mb-4">
-            <Avatar className="w-10 h-10 flex-shrink-0 border-2 border-background ring-2 ring-sidebar-border ring-offset-background transition-transform duration-300 group-hover:scale-105">
-              <AvatarImage src={user?.avatar} />
-              <AvatarFallback className="text-sm font-bold bg-primary/10 text-primary">
-                {user?.name?.split(' ').map(n => n[0]).join('') || 'U'}
-              </AvatarFallback>
-            </Avatar>
-            <div className="flex-1 min-w-0 opacity-100 lg:opacity-0 group-hover:lg:opacity-100 transition-opacity duration-300 delay-75">
-              <p className="text-sidebar-foreground text-sm font-bold truncate">{user?.name || 'Administrator'}</p>
-              <p className="text-sidebar-foreground/60 text-[11px] font-medium truncate">{user?.email || 'admin@smartbus.gov'}</p>
-            </div>
-          </div>
+          <ModeToggle />
           <Button
             variant="ghost"
             onClick={handleLogout}
@@ -120,6 +121,18 @@ export default function Layout() {
               Secure Logout
             </span>
           </Button>
+          <div className="flex items-center gap-4 px-[6px] mt-4 pt-4 border-t border-sidebar-border relative">
+            <Avatar className="w-10 h-10 flex-shrink-0 border-2 border-background ring-2 ring-sidebar-border ring-offset-background transition-transform duration-300 group-hover:scale-105">
+              <AvatarImage src={user?.avatar} />
+              <AvatarFallback className="text-sm font-bold bg-primary/10 text-primary">
+                {user?.name?.split(' ').map(n => n[0]).join('') || 'U'}
+              </AvatarFallback>
+            </Avatar>
+            <div className="flex-1 min-w-0 opacity-100 lg:opacity-0 group-hover:lg:opacity-100 transition-opacity duration-300 delay-75">
+              <p className="text-sidebar-foreground text-sm font-bold truncate">{user?.name || 'Administrator'}</p>
+              <p className="text-sidebar-foreground/60 text-[11px] font-medium truncate">{user?.email || 'admin@smartbus.gov'}</p>
+            </div>
+          </div>
         </div>
       </aside>
 

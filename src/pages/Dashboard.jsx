@@ -6,8 +6,18 @@ import CrowdBadge from '@/components/CrowdBadge';
 import { format } from 'date-fns';
 import { crowdReadingsService, busRequestsService, festivalsService, routesService } from '@/services/backend';
 import { APP_CONFIG } from '@/config';
+import { useQueryClient } from '@tanstack/react-query';
 
 export default function Dashboard() {
+  const currentTerminalId = localStorage.getItem('selectedTerminal') || 'madurai';
+  const queryClient = useQueryClient();
+
+  const { data: terminals = [] } = useQuery({
+    queryKey: ['terminals'],
+    queryFn: () => terminalsService.getTerminals(),
+  });
+  const activeTerminal = terminals.find(t => t.id === currentTerminalId) || terminals[0];
+
   const { data: readings = [] } = useQuery({
     queryKey: ['crowd-readings'],
     queryFn: () => crowdReadingsService.getAllReadings(),
@@ -29,10 +39,22 @@ export default function Dashboard() {
     queryFn: () => routesService.getAllRoutes(),
   });
 
+  const [isFestival, setIsFestival] = useState(() => {
+    const saved = localStorage.getItem('festivalMode');
+    return saved ? JSON.parse(saved) : false;
+  });
+
   const [liveTime, setLiveTime] = useState(format(new Date(), 'PPPP · h:mm:ss a'));
   const today = format(new Date(), 'yyyy-MM-dd');
-  const isFestivalToday = festivals.some(f => f.date === today && f.is_active);
+  const isFestivalToday = isFestival || festivals.some(f => f.date === today && f.is_active);
   const pendingRequests = requests.filter(r => r.status === 'pending').length;
+
+  const toggleFestival = () => {
+    const newVal = !isFestival;
+    setIsFestival(newVal);
+    localStorage.setItem('festivalMode', JSON.stringify(newVal));
+    queryClient.invalidateQueries({ queryKey: ['extra-bus-requests'] });
+  };
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -56,7 +78,9 @@ export default function Dashboard() {
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-foreground">{APP_CONFIG.full_name}</h1>
+          <h1 className="text-2xl font-bold text-foreground">
+            {activeTerminal?.city || 'Terminal Status'}
+          </h1>
           <p className="text-muted-foreground text-sm mt-0.5 flex items-center gap-1.5">
             <MapPin className="w-3.5 h-3.5" />
             Crowd Monitoring Dashboard
@@ -98,13 +122,16 @@ export default function Dashboard() {
           color="orange"
           isAlert={pendingRequests > 0}
         />
-        <StatCard
-          title="Festival Mode"
-          value={isFestivalToday ? "Active" : "Standard"}
-          icon={Bus}
-          trend={isFestivalToday ? "Higher caps" : "Normal caps"}
-          color={isFestivalToday ? "green" : "blue"}
-        />
+        <div onClick={toggleFestival} className="cursor-pointer transition-transform hover:scale-[1.02] active:scale-95">
+          <StatCard
+            title="Festival Mode"
+            value={isFestivalToday ? "Active" : "Inactive"}
+            icon={Bus}
+            trend={isFestivalToday ? "Higher caps" : "Normal caps"}
+            color={isFestivalToday ? "green" : "blue"}
+            isAlert={isFestivalToday}
+          />
+        </div>
       </div>
 
       <div>
@@ -113,7 +140,10 @@ export default function Dashboard() {
           Real-time Route Status
         </h2>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {routes.map((route) => {
+          {routes.filter((route, index, list) => {
+            const key = `${route.source || route.name}|${route.destination}`;
+            return index === list.findIndex(item => `${item.source || item.name}|${item.destination}` === key);
+          }).map((route) => {
             const standReading = latestMap[`${route.id}:bus_stand`];
             const frontReading = latestMap[`${route.id}:front_inside_bus`];
             const backReading = latestMap[`${route.id}:back_inside_bus`];
@@ -136,8 +166,8 @@ export default function Dashboard() {
               <div key={route.id} className="bg-card border border-border rounded-2xl p-5 shadow-sm hover:shadow-md transition-all">
                 <div className="flex items-start justify-between mb-4">
                   <div>
-                    <h3 className="font-bold text-foreground">{route.name}</h3>
-                    <p className="text-xs text-muted-foreground">{route.destination}</p>
+                    <h3 className="font-bold text-foreground">{route.source || route.name}</h3>
+                    <p className="text-[10px] uppercase font-bold text-muted-foreground tracking-widest mt-0.5">to {route.destination}</p>
                   </div>
                   <CrowdBadge level={level} />
                 </div>

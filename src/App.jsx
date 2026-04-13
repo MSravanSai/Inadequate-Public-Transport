@@ -1,5 +1,6 @@
 import { Toaster } from "@/components/ui/toaster"
 import { QueryClientProvider } from '@tanstack/react-query'
+import { ThemeProvider } from "next-themes";
 import { queryClientInstance } from '@/lib/query-client'
 import { BrowserRouter as Router, Route, Routes } from 'react-router-dom';
 import PageNotFound from './lib/PageNotFound';
@@ -13,6 +14,7 @@ import BusRequests from '@/pages/BusRequest';
 import RoutesPage from '@/pages/Routes';
 import Festivals from '@/pages/Festival';
 import PublicView from '@/pages/PublicView';
+import Terminals from '@/pages/Terminals';
 // Import Firebase configuration
 const AuthenticatedApp = () => {
   const { isLoadingAuth, isLoadingPublicSettings, authError, isAuthenticated } = useAuth();
@@ -46,6 +48,7 @@ const AuthenticatedApp = () => {
         <Route path="/routes" element={<RoutesPage />} />
         <Route path="/festivals" element={<Festivals />} />
         <Route path="/public" element={<PublicView />} />
+        <Route path="/terminals" element={<Terminals />} />
       </Route>
       <Route path="/login" element={<Login />} />
       <Route path="*" element={<PageNotFound />} />
@@ -55,14 +58,16 @@ const AuthenticatedApp = () => {
 
 function App() {
   return (
-    <AuthProvider>
+    <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+      <AuthProvider>
       <QueryClientProvider client={queryClientInstance}>
         <Router>
           <AuthenticatedApp />
         </Router>
         <Toaster />
       </QueryClientProvider>
-    </AuthProvider>
+      </AuthProvider>
+    </ThemeProvider>
   )
 }
 
