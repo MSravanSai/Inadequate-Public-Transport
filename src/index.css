@@ -72,6 +72,9 @@
     @apply bg-background text-foreground font-sans;
     font-family: 'Inter', system-ui, sans-serif;
   }
+  option {
+    @apply bg-background text-foreground;
+  }
 }
 
 @layer utilities {

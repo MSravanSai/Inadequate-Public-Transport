@@ -56,6 +56,31 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
   const [urlInput, setUrlInput] = useState(() => persistedSession?.urlInput ?? '');
   const [isYoutube, setIsYoutube] = useState(false);
   const [restoreTracking, setRestoreTracking] = useState(() => Boolean(persistedSession?.isTracking));
+  const [activeAnalysisSource, setActiveAnalysisSource] = useState(() => persistedSession?.activeAnalysisSource ?? null);
+  const [isIpCamera, setIsIpCamera] = useState(false);
+  const [droidIp, setDroidIp] = useState(() => persistedSession?.droidIp ?? '');
+  const [droidPort, setDroidPort] = useState(() => persistedSession?.droidPort ?? '4747');
+  const [droidEndpoint, setDroidEndpoint] = useState(() => persistedSession?.droidEndpoint ?? '/video');
+  const [videoDevices, setVideoDevices] = useState([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState(() => persistedSession?.selectedDeviceId ?? '');
+
+  useEffect(() => {
+    async function loadDevices() {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoInputs = devices.filter(d => d.kind === 'videoinput');
+        setVideoDevices(videoInputs);
+        if (videoInputs.length > 0 && !selectedDeviceId) setSelectedDeviceId(videoInputs[0].deviceId);
+      } catch (err) {
+        console.error('Failed to enumerate devices', err);
+      }
+    }
+    loadDevices();
+  }, [selectedDeviceId]);
+
+  const checkIpCamera = (url) => {
+    return /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(url) || url.toLowerCase().includes('mjpeg') || url.toLowerCase().includes('/video');
+  };
 
   const checkYoutube = (url) => {
     return url.includes('youtube.com/') || url.includes('youtu.be/');
@@ -67,6 +92,7 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
 
   const videoRef = useRef(null);
   const uploadVideoRef = useRef(null);
+  const mjpegImgRef = useRef(null);
   
   const liveLoopRef = useRef(null);
   const liveAnalysisInFlightRef = useRef(false);
@@ -89,12 +115,17 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
           sourceDim,
           liveStatus,
           isTracking: activeTab === 'upload' && uploadType === 'video' && liveStatus === 'live',
+          activeAnalysisSource,
+          droidIp,
+          droidPort,
+          droidEndpoint,
+          selectedDeviceId,
         })
       );
     } catch (error) {
       console.error('Failed to persist live monitor session:', error);
     }
-  }, [sessionKey, activeTab, uploadType, imageUrl, urlInput, liveCount, liveDetections, sourceDim, liveStatus]);
+  }, [sessionKey, activeTab, uploadType, imageUrl, urlInput, liveCount, liveDetections, sourceDim, liveStatus, activeAnalysisSource, droidIp, droidPort, droidEndpoint, selectedDeviceId]);
 
   const stopCameraStream = () => {
     if (liveLoopRef.current) {
@@ -102,6 +133,7 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
       liveLoopRef.current = null;
     }
     liveAnalysisInFlightRef.current = false;
+    setActiveAnalysisSource(null);
 
     if (videoRef.current && videoRef.current.srcObject) {
       videoRef.current.srcObject.getTracks().forEach(track => track.stop());
@@ -127,6 +159,7 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
   const handleReset = () => {
     stopCameraStream();
     setImageUrl(null);
+    setIsIpCamera(false);
     setLiveDetections([]);
     setLiveCount(null);
     setUrlInput('');
@@ -135,7 +168,7 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
     onReading(route.id, routeName, location, 0, isFestival, null, true, true);
   };
 
-  const startAnalysisLoop = (targetVideoRef) => {
+  const startAnalysisLoop = (targetMediaRef) => {
     if (liveLoopRef.current) clearInterval(liveLoopRef.current);
     
     const offscreenCanvas = document.createElement('canvas');
@@ -143,19 +176,26 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
     let tickCount = 0;
 
     liveLoopRef.current = setInterval(async () => {
-      const video = targetVideoRef.current;
-      if (!video || video.readyState < 2 || liveAnalysisInFlightRef.current) return;
+      const media = targetMediaRef.current;
+      if (!media || liveAnalysisInFlightRef.current) return;
+      
+      const isVideo = media.tagName === 'VIDEO';
+      if (isVideo && media.readyState < 2) return;
+      
+      const width = isVideo ? media.videoWidth : media.naturalWidth;
+      const height = isVideo ? media.videoHeight : media.naturalHeight;
+      if (!width || !height) return;
 
       liveAnalysisInFlightRef.current = true;
       try {
-        offscreenCanvas.width = video.videoWidth;
-        offscreenCanvas.height = video.videoHeight;
-        ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
+        offscreenCanvas.width = width;
+        offscreenCanvas.height = height;
+        ctx.drawImage(media, 0, 0, width, height);
 
         const result = await analyzePeopleCount(offscreenCanvas, 0.25);
         setLiveCount(result.count);
         setLiveDetections(result.detections);
-        setSourceDim({ width: video.videoWidth, height: video.videoHeight });
+        setSourceDim({ width, height });
         setLiveStatus('live');
         
         // Push background reads to Dashboard every 5 seconds silently without spamming Toasts
@@ -175,13 +215,15 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
   const startCamera = async () => {
     try {
       setLiveStatus('starting');
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'environment' } 
-      });
+      const constraints = selectedDeviceId 
+        ? { video: { deviceId: { exact: selectedDeviceId } } }
+        : { video: { facingMode: 'environment' } };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
       }
+      setActiveAnalysisSource('camera');
       startAnalysisLoop(videoRef);
     } catch (err) {
       console.error('Camera Error:', err);
@@ -195,13 +237,42 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
       uploadVideoRef.current.play();
       setLiveStatus('starting');
       setRestoreTracking(false);
+      setActiveAnalysisSource('upload');
       startAnalysisLoop(uploadVideoRef);
     }
   };
 
-  const analyzeStaticImage = async (url) => {
-    setLiveStatus('analyzing');
+  const analyzeStaticImage = async (rawUrl) => {
+    let url = rawUrl.trim();
+    
+    // Auto-detect raw IP or IP:PORT and format for DroidCam / IP Webcam automatically
+    if (/^(\d{1,3}\.){3}\d{1,3}$/.test(url)) {
+      url = `http://${url}:4747/video`;
+      setUrlInput(url);
+    } else if (/^(\d{1,3}\.){3}\d{1,3}:\d+$/.test(url)) {
+      url = `http://${url}/video`;
+      setUrlInput(url);
+    } else if (/^http:\/\/(\d{1,3}\.){3}\d{1,3}:\d+$/.test(url)) {
+      url = `${url}/video`;
+      setUrlInput(url);
+    }
+
+    setLiveStatus('starting');
     setImageUrl(url);
+    setActiveAnalysisSource('url');
+    
+    const isIpCam = checkIpCamera(url);
+    setIsIpCamera(isIpCam);
+
+    if (isIpCam) {
+       setTimeout(() => {
+         setLiveStatus('live');
+         startAnalysisLoop(mjpegImgRef);
+       }, 1000);
+       return;
+    }
+
+    setLiveStatus('analyzing');
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = async () => {
@@ -253,12 +324,9 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
   };
 
   useEffect(() => {
-    if (activeTab !== 'camera' && activeTab !== 'upload') {
-      stopCameraStream();
-    } else if (activeTab === 'upload' && uploadType === 'image') {
-       stopCameraStream();
-    }
-  }, [activeTab, uploadType]);
+    // The user requested that the camera continues to show across tabs until a file is uploaded.
+    // No unconditional stream reset here.
+  }, [activeTab]);
 
   useEffect(() => {
     if (
@@ -358,9 +426,9 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
             <TabsTrigger value="upload" className="text-xs py-2.5 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-accent data-[state=active]:bg-accent/5"><Upload className="w-3 h-3 mr-1.5"/>File</TabsTrigger>
             <TabsTrigger value="url" className="text-xs py-2.5 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-accent data-[state=active]:bg-accent/5"><LinkIcon className="w-3 h-3 mr-1.5"/>Link</TabsTrigger>
           </TabsList>
-          
+
           {/* Mobile Tab */}
-          <TabsContent value="camera" className="m-0 border-none p-0 flex-col flex flex-1 focus-visible:outline-none">
+          <TabsContent value="camera" forceMount className="m-0 border-none p-0 flex-col flex flex-1 focus-visible:outline-none data-[state=inactive]:hidden">
             <div className="relative bg-slate-900 aspect-video flex items-center justify-center overflow-hidden">
               <video 
                 ref={videoRef} 
@@ -368,17 +436,15 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
                 muted 
                 className={`w-full h-full object-cover ${liveStatus === 'idle' ? 'hidden' : 'block'}`}
               />
-              {renderBoundingBoxes(true)}
+              {activeAnalysisSource === 'camera' && renderBoundingBoxes(true)}
               
               {liveStatus === 'idle' && (
                 <div className="text-center">
                   <Camera className="w-10 h-10 text-slate-800/10 mx-auto" />
                 </div>
               )}
-
-
               
-              {liveCount !== null && (
+              {activeAnalysisSource === 'camera' && liveCount !== null && (
                 <div className="absolute bottom-2 left-2 bg-black/70 text-white rounded-lg px-3 py-1.5 flex items-center gap-2 shadow-lg backdrop-blur-sm">
                   <span className="text-lg font-bold">{liveCount}</span>
                   <span className="text-xs text-white/70">people</span>
@@ -386,6 +452,20 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
               )}
             </div>
             <div className="px-4 py-3 space-y-2 bg-card">
+              {videoDevices.length > 1 && liveStatus === 'idle' && (
+                <select 
+                  value={selectedDeviceId}
+                  onChange={(e) => setSelectedDeviceId(e.target.value)}
+                  className="w-full text-xs p-1.5 rounded-md border border-border bg-background mb-1"
+                >
+                  <option value="" disabled>Select Camera Device</option>
+                  {videoDevices.map((device, idx) => (
+                    <option key={device.deviceId} value={device.deviceId}>
+                      {device.label || `Camera ${idx + 1}`}
+                    </option>
+                  ))}
+                </select>
+              )}
               {liveStatus === 'idle' ? (
                 <Button onClick={startCamera} className="w-full shadow-sm" size="sm"><Camera className="w-3.5 h-3.5 mr-1.5" /> Start Surveillance</Button>
               ) : (
@@ -395,7 +475,7 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
           </TabsContent>
 
           {/* Upload Tab */}
-          <TabsContent value="upload" className="m-0 border-none p-0 flex-col flex flex-1 focus-visible:outline-none">
+          <TabsContent value="upload" forceMount className="m-0 border-none p-0 flex-col flex flex-1 focus-visible:outline-none data-[state=inactive]:hidden">
             <div className="relative bg-slate-900/90 aspect-video flex items-center justify-center overflow-hidden border-b border-border/50">
                {imageUrl ? (
                  uploadType === 'video' ? (
@@ -409,8 +489,9 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
                    <span className="text-xs"></span>
                  </div>
                )}
-               {renderBoundingBoxes(uploadType !== 'video')}
-               {imageUrl && liveCount !== null && (
+               {/* Only draw bounding boxes if an actual file is loaded and this tab is the analysis source */}
+               {activeAnalysisSource === 'upload' && imageUrl && renderBoundingBoxes(uploadType !== 'video')}
+               {activeAnalysisSource === 'upload' && imageUrl && liveCount !== null && (
                  <div className="absolute bottom-2 left-2 bg-black/70 text-white rounded-lg px-3 py-1.5 flex items-center gap-2 shadow-lg backdrop-blur-sm pointer-events-none">
                     <span className="text-lg font-bold">{liveCount}</span>
                     <span className="text-xs text-white/70">people</span>
@@ -435,7 +516,7 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
           </TabsContent>
 
           {/* Link Tab */}
-          <TabsContent value="url" className="m-0 border-none p-0 flex-col flex flex-1 focus-visible:outline-none">
+          <TabsContent value="url" forceMount className="m-0 border-none p-0 flex-col flex flex-1 focus-visible:outline-none data-[state=inactive]:hidden">
             <div className="relative bg-slate-900/90 aspect-video flex items-center justify-center overflow-hidden border-b border-border/50">
                {imageUrl ? (
                  isYoutube ? (
@@ -446,7 +527,7 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
                      allowFullScreen
                    />
                  ) : (
-                   <img src={imageUrl} alt="Linked url" className="w-full h-full object-cover" />
+                   <img ref={isIpCamera ? mjpegImgRef : null} src={imageUrl} alt="Linked url" className="w-full h-full object-cover bg-black" crossOrigin={isIpCamera ? "anonymous" : undefined} />
                  )
                ) : (
                  <div className="text-center text-slate-500">
@@ -454,8 +535,9 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
                    <span className="text-xs"></span>
                  </div>
                )}
-               {!isYoutube && renderBoundingBoxes(true)}
-               {imageUrl && liveCount !== null && !isYoutube && (
+               {/* Only draw bounding boxes if a link is actually analyzed and this tab is the analysis source */}
+               {activeAnalysisSource === 'url' && imageUrl && !isYoutube && renderBoundingBoxes(true)}
+               {activeAnalysisSource === 'url' && imageUrl && liveCount !== null && !isYoutube && (
                  <div className="absolute bottom-2 left-2 bg-black/70 text-white rounded-lg px-3 py-1.5 flex items-center gap-2 shadow-lg backdrop-blur-sm">
                     <span className="text-lg font-bold">{liveCount}</span>
                     <span className="text-xs text-white/70">people</span>
@@ -467,23 +549,72 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
                  </div>
                )}
             </div>
-            <div className="px-4 py-3 flex gap-2 bg-card">
-               <Input 
-                 value={urlInput} 
-                 onChange={e => setUrlInput(e.target.value)} 
-                 placeholder="https://..." 
-                 className="flex-1 text-xs h-8" 
-                 onKeyDown={e => e.key === 'Enter' && urlInput && analyzeStaticImage(urlInput)}
-               />
-               <Button 
-                 onClick={() => urlInput && analyzeStaticImage(urlInput)} 
-                 size="sm" 
-                 variant="secondary"
-                 className="h-8 shrink-0" 
-                 disabled={!urlInput || liveStatus === 'analyzing'}
-               >
-                 {liveStatus === 'analyzing' ? 'Analyzing...' : 'Load'}
-               </Button>
+            <div className="px-4 py-3 flex flex-col gap-3 bg-card border-t border-border/50">
+               <div className="flex gap-2">
+                 <Input 
+                   value={urlInput} 
+                   onChange={e => setUrlInput(e.target.value)} 
+                   placeholder="http://192.168.1.100:4747/video (IP Camera) or https://..." 
+                   className="flex-1 text-xs h-8" 
+                   onKeyDown={e => e.key === 'Enter' && urlInput && analyzeStaticImage(urlInput)}
+                 />
+                 <Button 
+                   onClick={() => urlInput && analyzeStaticImage(urlInput)} 
+                   size="sm" 
+                   variant="secondary"
+                   className="h-8 shrink-0" 
+                   disabled={!urlInput || (liveStatus !== 'idle' && liveStatus !== 'analyzed' && liveStatus !== 'error')}
+                 >
+                   {liveStatus === 'analyzing' || liveStatus === 'starting' ? 'Loading' : 'Load URL'}
+                 </Button>
+               </div>
+               
+               {/* DroidCam Quick Connect Section */}
+               <div className="pt-2 border-t border-border/30">
+                 <div className="text-[10px] font-bold text-blue-500 mb-2 uppercase flex items-center gap-1.5">
+                   <div className="w-1.5 h-1.5 rounded-full bg-blue-500"></div> DROIDCAM QUICK CONNECT
+                 </div>
+                 <div className="flex gap-2">
+                   <Input 
+                     value={droidIp}
+                     onChange={e => setDroidIp(e.target.value)}
+                     placeholder="192.168.x.x"
+                     className="flex-[2] text-xs h-8"
+                   />
+                   <Input
+                     value={droidPort}
+                     onChange={e => setDroidPort(e.target.value)}
+                     placeholder="4747"
+                     className="flex-1 text-xs h-8"
+                   />
+                   <Input
+                     value={droidEndpoint}
+                     onChange={e => setDroidEndpoint(e.target.value)}
+                     placeholder="/video"
+                     className="flex-1 text-xs h-8"
+                   />
+                   <Button 
+                     onClick={() => {
+                        const endpoint = droidEndpoint.startsWith('/') ? droidEndpoint : `/${droidEndpoint}`;
+                        const formattedUrl = `http://${droidIp}:${droidPort}${endpoint}`;
+                        setUrlInput(formattedUrl);
+                        analyzeStaticImage(formattedUrl);
+                     }} 
+                     size="sm" 
+                     variant="outline" 
+                     className="h-8 shrink-0 text-xs font-medium"
+                     disabled={!droidIp}
+                   >
+                     Connect
+                   </Button>
+                 </div>
+               </div>
+
+               {isIpCamera && liveStatus === 'live' && (
+                 <Button onClick={stopCameraStream} variant="outline" size="sm" className="h-8 w-full mt-1 relative z-10">
+                   <X className="w-3 h-3 mr-1.5" /> Stop DroidCam
+                 </Button>
+               )}
             </div>
           </TabsContent>
       </Tabs>
