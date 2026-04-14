@@ -235,9 +235,15 @@ export default function PublicView() {
 
         {routeList.map(route => {
           const standReading = getLatestReading(route.id, 'bus_stand');
-          const busReading = getLatestReading(route.id, 'inside_bus');
+          const frontBus = getLatestReading(route.id, 'front_inside_bus');
+          const backBus = getLatestReading(route.id, 'back_inside_bus');
+          const legacyBus = getLatestReading(route.id, 'inside_bus');
+          
+          const busCount = (frontBus?.people_count ?? 0) + (backBus?.people_count ?? 0) + (legacyBus?.people_count ?? 0);
+          const hasAnyBusReading = frontBus || backBus || legacyBus;
+          
           const extraBuses = getApprovedBuses(route.id);
-          const level = standReading?.crowd_level || 'low';
+          const level = standReading?.crowd_level || (hasAnyBusReading ? 'low' : 'low'); // Fallback logic
           const estimatedHours = Math.round(route.distance_km / 50 || 0);
 
           return (
@@ -263,8 +269,8 @@ export default function PublicView() {
                 </div>
                 <div className="bg-muted/50 rounded-xl p-3 text-center">
                   <p className="text-xs text-muted-foreground mb-1">In Bus</p>
-                  <p className="text-2xl font-bold text-foreground">{busReading?.people_count ?? '—'}</p>
-                  <p className="text-xs text-muted-foreground">passengers</p>
+                  <p className="text-2xl font-bold text-foreground">{hasAnyBusReading ? busCount : '—'}</p>
+                  <p className="text-xs text-muted-foreground">{busCount === 1 ? 'passenger' : 'passengers'}</p>
                 </div>
               </div>
 

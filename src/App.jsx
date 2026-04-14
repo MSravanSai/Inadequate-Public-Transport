@@ -16,6 +16,7 @@ import Festivals from '@/pages/Festival';
 import PublicView from '@/pages/PublicView';
 import Terminals from '@/pages/Terminals';
 // Import Firebase configuration
+import '@/lib/firebase';
 const AuthenticatedApp = () => {
   const { isLoadingAuth, isLoadingPublicSettings, authError, isAuthenticated } = useAuth();
 

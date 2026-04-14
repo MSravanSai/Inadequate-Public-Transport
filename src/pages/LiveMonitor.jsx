@@ -35,7 +35,7 @@ function getCrowdLevel(count, isFestival, location = 'bus_stand') {
   return 'critical';
 }
 
-function CameraCard({ route, location, isFestival, onReading, latestReading }) {
+function CameraCard({ route, location, isFestival, onReading, latestReading, selectedRoute }) {
   const sessionKey = `${LIVE_MONITOR_SESSION_PREFIX}:${route.id}:${location}`;
   const persistedSession = (() => {
     try {
@@ -49,7 +49,11 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
   const [liveCount, setLiveCount] = useState(() => persistedSession?.liveCount ?? latestReading?.people_count ?? null);
   const [liveDetections, setLiveDetections] = useState(() => persistedSession?.liveDetections ?? []);
   const [sourceDim, setSourceDim] = useState(() => persistedSession?.sourceDim ?? { width: 0, height: 0 });
-  const [liveStatus, setLiveStatus] = useState(() => persistedSession?.liveStatus ?? 'idle'); // 'idle', 'starting', 'live', 'analyzing', 'analyzed', 'error'
+  const [liveStatus, setLiveStatus] = useState(() => {
+    // Only auto-restore 'live' for non-camera sources (URLs/Files)
+    if (persistedSession?.activeAnalysisSource === 'camera') return 'idle';
+    return persistedSession?.liveStatus ?? 'idle';
+  });
   const [imageUrl, setImageUrl] = useState(() => persistedSession?.imageUrl ?? null);
   const [uploadType, setUploadType] = useState(() => persistedSession?.uploadType ?? 'image'); // 'image' or 'video'
   const [activeTab, setActiveTab] = useState(() => persistedSession?.activeTab ?? 'camera');
@@ -65,16 +69,18 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
   const [selectedDeviceId, setSelectedDeviceId] = useState(() => persistedSession?.selectedDeviceId ?? '');
 
   useEffect(() => {
-    async function loadDevices() {
+    const loadDevices = async () => {
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
         const videoInputs = devices.filter(d => d.kind === 'videoinput');
         setVideoDevices(videoInputs);
-        if (videoInputs.length > 0 && !selectedDeviceId) setSelectedDeviceId(videoInputs[0].deviceId);
+        if (videoInputs.length > 0 && !selectedDeviceId) {
+          setSelectedDeviceId(videoInputs[0].deviceId);
+        }
       } catch (err) {
         console.error('Failed to enumerate devices', err);
       }
-    }
+    };
     loadDevices();
   }, [selectedDeviceId]);
 
@@ -100,6 +106,29 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
 
   const label = LOCATION_LABELS[location] || location.replace('_', ' ');
   const cameraId = `cam-${route.id}-${location}`;
+
+  // Restore session on mount
+  useEffect(() => {
+    // Clear detections on start to avoid "ghost" boxes from old sessions
+    setLiveDetections([]);
+    setLiveCount(null);
+
+    if (!persistedSession) return;
+    
+    if (persistedSession.liveStatus === 'live' || persistedSession.liveStatus === 'analyzing') {
+      if (persistedSession.activeAnalysisSource === 'url' && persistedSession.imageUrl) {
+        analyzeStaticImage(persistedSession.imageUrl);
+      } else if (persistedSession.activeAnalysisSource === 'camera') {
+        // Only show toast if this card belongs to the currently selected route
+        if (selectedRoute === route.id) {
+          toast({
+            title: "Camera Ready",
+            description: `Click Start on the ${label} to resume surveillance.`,
+          });
+        }
+      }
+    }
+  }, []);
 
   useEffect(() => {
     try {
@@ -186,6 +215,14 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
       const height = isVideo ? media.videoHeight : media.naturalHeight;
       if (!width || !height) return;
 
+      // Update resolution/status immediately to show the stream is active
+      if (liveStatus !== 'live' && liveStatus !== 'analyzing' && liveStatus !== 'analyzed') {
+        setLiveStatus('live');
+      }
+      if (sourceDim.width !== width) {
+        setSourceDim({ width, height });
+      }
+
       liveAnalysisInFlightRef.current = true;
       try {
         offscreenCanvas.width = width;
@@ -193,19 +230,22 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
         ctx.drawImage(media, 0, 0, width, height);
 
         const result = await analyzePeopleCount(offscreenCanvas, 0.25);
-        setLiveCount(result.count);
-        setLiveDetections(result.detections);
-        setSourceDim({ width, height });
+        
+        // Always update count even if 0, to remove 'null' state
+        const newCount = result.count ?? 0;
+        setLiveCount(newCount);
+        setLiveDetections(result.detections || []);
         setLiveStatus('live');
         
-        // Push background reads to Dashboard every 5 seconds silently without spamming Toasts
+        // Push background reads to Dashboard every 5 seconds silently
          if (tickCount % 10 === 0) {
             const routeName = route.source ? `${route.source} → ${route.destination}` : route.name;
-            onReading(route.id, routeName, location, result.count, isFestival, null, true, false); // silent=true, skipVerif=false for live
+            onReading(route.id, routeName, location, newCount, isFestival, null, true, false);
          }
         tickCount++;
       } catch (error) {
-        console.error('Detection error:', error);
+        console.error('Detection loop error:', error);
+        // Don't kill the loop, just log and allow next iteration
       } finally {
         liveAnalysisInFlightRef.current = false;
       }
@@ -267,8 +307,10 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
     if (isIpCam) {
        setTimeout(() => {
          setLiveStatus('live');
-         startAnalysisLoop(mjpegImgRef);
-       }, 1000);
+         if (mjpegImgRef.current) {
+           startAnalysisLoop(mjpegImgRef);
+         }
+       }, 1500);
        return;
     }
 
@@ -408,6 +450,17 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
         </div>
         <div className="flex items-center gap-2">
           <button 
+            onClick={async () => {
+              // Refresh device list
+              const devices = await navigator.mediaDevices.enumerateDevices();
+              setVideoDevices(devices.filter(d => d.kind === 'videoinput'));
+            }}
+            className="p-1 hover:bg-muted rounded-md transition-colors text-muted-foreground hover:text-accent"
+            title="Refresh Devices"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+          </button>
+          <button 
             onClick={handleReset}
             className="p-1 hover:bg-muted rounded-md transition-colors text-muted-foreground hover:text-accent group"
             title="Reset Camera"
@@ -422,9 +475,9 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full flex-1 flex flex-col">
           <TabsList className="grid w-full grid-cols-3 rounded-none border-b h-auto select-none p-0 bg-transparent">
-            <TabsTrigger value="camera" className="text-xs py-2.5 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-accent data-[state=active]:bg-accent/5"><Camera className="w-3 h-3 mr-1.5"/>Mobile</TabsTrigger>
+            <TabsTrigger value="camera" className="text-xs py-2.5 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-accent data-[state=active]:bg-accent/5"><Camera className="w-3 h-3 mr-1.5"/>Local / USB</TabsTrigger>
             <TabsTrigger value="upload" className="text-xs py-2.5 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-accent data-[state=active]:bg-accent/5"><Upload className="w-3 h-3 mr-1.5"/>File</TabsTrigger>
-            <TabsTrigger value="url" className="text-xs py-2.5 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-accent data-[state=active]:bg-accent/5"><LinkIcon className="w-3 h-3 mr-1.5"/>Link</TabsTrigger>
+            <TabsTrigger value="url" className="text-xs py-2.5 rounded-none data-[state=active]:border-b-2 data-[state=active]:border-accent data-[state=active]:bg-accent/5"><LinkIcon className="w-3 h-3 mr-1.5"/>IP / Link</TabsTrigger>
           </TabsList>
 
           {/* Mobile Tab */}
@@ -434,9 +487,10 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
                 ref={videoRef} 
                 playsInline 
                 muted 
+                crossOrigin="anonymous"
                 className={`w-full h-full object-cover ${liveStatus === 'idle' ? 'hidden' : 'block'}`}
               />
-              {activeAnalysisSource === 'camera' && renderBoundingBoxes(true)}
+              {liveStatus !== 'idle' && renderBoundingBoxes(false)}
               
               {liveStatus === 'idle' && (
                 <div className="text-center">
@@ -444,33 +498,38 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
                 </div>
               )}
               
-              {activeAnalysisSource === 'camera' && liveCount !== null && (
-                <div className="absolute bottom-2 left-2 bg-black/70 text-white rounded-lg px-3 py-1.5 flex items-center gap-2 shadow-lg backdrop-blur-sm">
-                  <span className="text-lg font-bold">{liveCount}</span>
+              {(activeAnalysisSource === 'camera' || liveStatus !== 'idle') && (liveCount !== null || liveStatus === 'live') && (
+                <div className="absolute bottom-2 left-2 bg-black/70 text-white rounded-lg px-3 py-1.5 flex items-center gap-2 shadow-lg backdrop-blur-sm z-20">
+                  <span className="text-lg font-bold">{liveCount ?? 0}</span>
                   <span className="text-xs text-white/70">people</span>
                 </div>
               )}
             </div>
             <div className="px-4 py-3 space-y-2 bg-card">
-              {videoDevices.length > 1 && liveStatus === 'idle' && (
-                <select 
-                  value={selectedDeviceId}
-                  onChange={(e) => setSelectedDeviceId(e.target.value)}
-                  className="w-full text-xs p-1.5 rounded-md border border-border bg-background mb-1"
-                >
-                  <option value="" disabled>Select Camera Device</option>
-                  {videoDevices.map((device, idx) => (
-                    <option key={device.deviceId} value={device.deviceId}>
-                      {device.label || `Camera ${idx + 1}`}
-                    </option>
-                  ))}
-                </select>
+              {videoDevices.length > 0 && liveStatus === 'idle' && (
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-muted-foreground uppercase opacity-70">Select Input Device (USB/Webcam)</label>
+                  <select 
+                    value={selectedDeviceId}
+                    onChange={(e) => setSelectedDeviceId(e.target.value)}
+                    className="w-full text-xs p-1.5 rounded-md border border-border bg-background mb-1 appearance-none focus:ring-1 focus:ring-accent outline-none"
+                  >
+                    {videoDevices.map((device, idx) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.label || `Camera ${idx + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               )}
               {liveStatus === 'idle' ? (
-                <Button onClick={startCamera} className="w-full shadow-sm" size="sm"><Camera className="w-3.5 h-3.5 mr-1.5" /> Start Surveillance</Button>
+                <Button onClick={startCamera} className="w-full shadow-sm" size="sm" disabled={videoDevices.length === 0}>
+                   <Camera className="w-3.5 h-3.5 mr-1.5" /> Start Surveillance
+                </Button>
               ) : (
                 <Button onClick={stopCameraStream} variant="outline" className="w-full text-xs" size="sm"><X className="w-3 h-3 mr-1.5" /> Stop Camera</Button>
               )}
+              {videoDevices.length === 0 && <p className="text-[10px] text-red-500 text-center">No USB/Local cameras detected.</p>}
             </div>
           </TabsContent>
 
@@ -479,9 +538,9 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
             <div className="relative bg-slate-900/90 aspect-video flex items-center justify-center overflow-hidden border-b border-border/50">
                {imageUrl ? (
                  uploadType === 'video' ? (
-                   <video ref={uploadVideoRef} src={imageUrl} muted autoPlay={false} playsInline loop controls className="w-full h-full object-contain bg-black" />
+                   <video ref={uploadVideoRef} src={imageUrl} muted autoPlay={false} playsInline loop controls crossOrigin="anonymous" className="w-full h-full object-contain bg-black" />
                  ) : (
-                   <img src={imageUrl} alt="Uploaded" className="w-full h-full object-cover" />
+                   <img src={imageUrl} alt="Uploaded" crossOrigin="anonymous" className="w-full h-full object-cover" />
                  )
                ) : (
                  <div className="text-center text-slate-500">
@@ -489,11 +548,11 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
                    <span className="text-xs"></span>
                  </div>
                )}
-               {/* Only draw bounding boxes if an actual file is loaded and this tab is the analysis source */}
-               {activeAnalysisSource === 'upload' && imageUrl && renderBoundingBoxes(uploadType !== 'video')}
-               {activeAnalysisSource === 'upload' && imageUrl && liveCount !== null && (
-                 <div className="absolute bottom-2 left-2 bg-black/70 text-white rounded-lg px-3 py-1.5 flex items-center gap-2 shadow-lg backdrop-blur-sm pointer-events-none">
-                    <span className="text-lg font-bold">{liveCount}</span>
+               {/* Show boxes if this camera is live, regardless of which tab connects the feed */}
+               {liveStatus !== 'idle' && imageUrl && renderBoundingBoxes(uploadType !== 'video')}
+               {(activeAnalysisSource === 'upload' || liveStatus !== 'idle') && imageUrl && (liveCount !== null || liveStatus === 'analyzed' || liveStatus === 'live') && (
+                 <div className="absolute bottom-2 left-2 bg-black/70 text-white rounded-lg px-3 py-1.5 flex items-center gap-2 shadow-lg backdrop-blur-sm pointer-events-none z-20">
+                    <span className="text-lg font-bold">{liveCount ?? 0}</span>
                     <span className="text-xs text-white/70">people</span>
                  </div>
                )}
@@ -527,7 +586,13 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
                      allowFullScreen
                    />
                  ) : (
-                   <img ref={isIpCamera ? mjpegImgRef : null} src={imageUrl} alt="Linked url" className="w-full h-full object-cover bg-black" crossOrigin={isIpCamera ? "anonymous" : undefined} />
+                   <img 
+                     ref={isIpCamera ? mjpegImgRef : null} 
+                     src={imageUrl} 
+                     alt="Linked url" 
+                     className="w-full h-full object-cover bg-black" 
+                     crossOrigin="anonymous" 
+                   />
                  )
                ) : (
                  <div className="text-center text-slate-500">
@@ -535,11 +600,11 @@ function CameraCard({ route, location, isFestival, onReading, latestReading }) {
                    <span className="text-xs"></span>
                  </div>
                )}
-               {/* Only draw bounding boxes if a link is actually analyzed and this tab is the analysis source */}
-               {activeAnalysisSource === 'url' && imageUrl && !isYoutube && renderBoundingBoxes(true)}
-               {activeAnalysisSource === 'url' && imageUrl && liveCount !== null && !isYoutube && (
-                 <div className="absolute bottom-2 left-2 bg-black/70 text-white rounded-lg px-3 py-1.5 flex items-center gap-2 shadow-lg backdrop-blur-sm">
-                    <span className="text-lg font-bold">{liveCount}</span>
+               {/* Show boxes if this camera is live, regardless of which tab connects the feed */}
+               {liveStatus !== 'idle' && imageUrl && !isYoutube && renderBoundingBoxes(true)}
+               {(activeAnalysisSource === 'url' || liveStatus !== 'idle') && imageUrl && !isYoutube && (liveCount !== null || liveStatus === 'live' || liveStatus === 'analyzed') && (
+                 <div className="absolute bottom-2 left-2 bg-black/70 text-white rounded-lg px-3 py-1.5 flex items-center gap-2 shadow-lg backdrop-blur-sm z-20">
+                    <span className="text-lg font-bold">{liveCount ?? 0}</span>
                     <span className="text-xs text-white/70">people</span>
                  </div>
                )}
@@ -766,12 +831,7 @@ export default function LiveMonitor() {
   const handleReading = async (routeId, routeName, location, count, festival, snapshotUrl, silent = false, skipVerification = false) => {
     const level = getCrowdLevel(count, festival, location);
 
-    // Map location for storage
-    const locationMap = {
-      'front_inside_bus': 'inside_bus',
-      'back_inside_bus': 'inside_bus'
-    };
-    const storageLocation = locationMap[location] || location;
+    const storageLocation = location;
 
     await createReading.mutateAsync({
       route_id: routeId,
@@ -911,6 +971,25 @@ export default function LiveMonitor() {
             </div>
             <span className={isFestival ? 'text-orange-600 font-medium' : 'text-muted-foreground'}>Festival Mode</span>
           </label>
+
+          {ROUTES.some(r => {
+            const sessStand = localStorage.getItem(`smartbus_livemonitor:${r.id}:bus_stand`);
+            const sessFront = localStorage.getItem(`smartbus_livemonitor:${r.id}:front_inside_bus`);
+            const sessBack = localStorage.getItem(`smartbus_livemonitor:${r.id}:back_inside_bus`);
+            
+            const check = (s) => s && JSON.parse(s).activeAnalysisSource === 'camera';
+            return check(sessStand) || check(sessFront) || check(sessBack);
+          }) && (
+            <Button 
+              size="sm" 
+              variant="outline" 
+              className="bg-accent/10 border-accent/20 text-accent hover:bg-accent/20"
+              onClick={() => window.location.reload()}
+            >
+              <Camera className="w-3.5 h-3.5 mr-1.5" /> Resume All Cameras
+            </Button>
+          )}
+
           <Button 
             onClick={() => setShowManualDeploy(true)}
             size="sm"
@@ -1057,6 +1136,7 @@ export default function LiveMonitor() {
                 isFestival={isFestival}
                 onReading={handleReading}
                 latestReading={getLatest(routeData.id, 'bus_stand')}
+                selectedRoute={selectedRoute}
               />
               <CameraCard
                 key={`${routeData.id}-front_inside_bus`}
@@ -1065,6 +1145,7 @@ export default function LiveMonitor() {
                 isFestival={isFestival}
                 onReading={handleReading}
                 latestReading={getLatest(routeData.id, 'front_inside_bus')}
+                selectedRoute={selectedRoute}
               />
               <CameraCard
                 key={`${routeData.id}-back_inside_bus`}
@@ -1073,6 +1154,7 @@ export default function LiveMonitor() {
                 isFestival={isFestival}
                 onReading={handleReading}
                 latestReading={getLatest(routeData.id, 'back_inside_bus')}
+                selectedRoute={selectedRoute}
               />
             </div>
           ))
